@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { RoomEvent } from 'livekit-client';
 import { PhoneOff } from 'lucide-react';
 import { useAgent, useRoomContext, useSessionContext } from '@livekit/components-react';
 import {
@@ -70,18 +71,23 @@ export function AgentSessionView_01({
   const { state: agentState } = useAgent();
   const room = useRoomContext();
 
-  // Enable the mic on join so the agent actually hears the meeting (it's a
-  // listening copilot). Prompts for the browser mic grant on first join; the user
-  // can mute anytime via the footer toggle. Runs once when the room is live.
-  const micPrimed = React.useRef(false);
+  // Mic ON by default: enable it as soon as the room is connected so the agent
+  // hears the meeting. Covers both "already connected on mount" and the Connected
+  // event (room.state isn't reactive, so we don't rely on it as a dep). First join
+  // prompts for the browser mic grant; the footer toggle can mute afterward.
   React.useEffect(() => {
-    if (!room || micPrimed.current) return;
-    if (room.state !== 'connected') return;
-    micPrimed.current = true;
-    room.localParticipant
-      .setMicrophoneEnabled(true)
-      .catch((e) => console.warn('tellmequick: could not enable microphone on join', e));
-  }, [room, room?.state]);
+    if (!room) return;
+    const enableMic = () => {
+      room.localParticipant
+        .setMicrophoneEnabled(true)
+        .catch((e) => console.warn('tellmequick: could not enable microphone', e));
+    };
+    if (room.state === 'connected') enableMic();
+    room.on(RoomEvent.Connected, enableMic);
+    return () => {
+      room.off(RoomEvent.Connected, enableMic);
+    };
+  }, [room]);
 
   const liveCards = useAgentCards();
   const cards = liveCards.length > 0 ? liveCards : DEMO_FEED ? SAMPLE_CARDS : [];
