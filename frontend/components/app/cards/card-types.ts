@@ -75,6 +75,20 @@ export const KIND_LABEL: Record<CardKind, string> = {
   viz: 'Insight',
 };
 
+/** The agent's wake name (mirrors the backend AGENT_WAKE_NAMES). Typed questions
+ *  are auto-prefixed with it so the agent always treats them as addressed. */
+export const WAKE_NAME = 'tellmequick';
+
+/** Strip a leading wake-name so a card's prompt shows the clean question. */
+export function cleanPrompt(text?: string): string | undefined {
+  if (!text) return undefined;
+  const stripped = text
+    .trim()
+    .replace(/^(hey\s+|ok\s+|okay\s+)?(tell me quick|tellmequick)[\s,:.!?-]*/i, '')
+    .trim();
+  return stripped || text.trim();
+}
+
 /** Compact relative time, e.g. "now", "12s", "3m", "1h". */
 export function timeAgo(ts: number, now: number): string {
   const s = Math.max(0, Math.round((now - ts) / 1000));

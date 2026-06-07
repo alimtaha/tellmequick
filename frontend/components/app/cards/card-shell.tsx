@@ -14,6 +14,9 @@ interface CardShellProps {
   kind: CardKind;
   ts: number;
   now: number;
+  /** The utterance/question that triggered this card, shown quoted above the
+   *  response so the question→answer pairing is obvious. */
+  prompt?: string;
   /** Optional content on the right of the header (e.g. timing, topic). */
   headerRight?: React.ReactNode;
   children: React.ReactNode;
@@ -24,7 +27,7 @@ interface CardShellProps {
  * so every card's kind and recency are instantly legible. Accent comes from the
  * per-kind CSS var (the feed taxonomy).
  */
-export function CardShell({ kind, ts, now, headerRight, children }: CardShellProps) {
+export function CardShell({ kind, ts, now, prompt, headerRight, children }: CardShellProps) {
   const Icon = KIND_ICON[kind];
   const accent = KIND_ACCENT[kind];
   return (
@@ -60,6 +63,13 @@ export function CardShell({ kind, ts, now, headerRight, children }: CardShellPro
             {timeAgo(ts || now, now)}
           </time>
         </header>
+        {/* The question/utterance that triggered this card (quoted), so it's clear
+            what was asked vs. what the agent returned below. */}
+        {prompt && (
+          <p className="text-muted-foreground border-border/70 mb-2 border-l-2 pl-2 text-[13px] leading-snug italic">
+            “{prompt}”
+          </p>
+        )}
         {children}
       </div>
     </article>

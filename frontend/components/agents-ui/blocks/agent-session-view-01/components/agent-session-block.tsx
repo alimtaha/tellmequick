@@ -1,29 +1,20 @@
 'use client';
 
-import React, { useState } from 'react';
-import { AnimatePresence, type MotionProps, motion } from 'motion/react';
-import { useAgent, useSessionContext, useSessionMessages } from '@livekit/components-react';
-import { AgentChatTranscript } from '@/components/agents-ui/agent-chat-transcript';
+import React from 'react';
+import { PhoneOff } from 'lucide-react';
+import { useAgent, useSessionContext } from '@livekit/components-react';
 import {
   AgentControlBar,
   type AgentControlBarControls,
 } from '@/components/agents-ui/agent-control-bar';
+import { AskInput } from '@/components/app/ask-input';
 import { CardFeed } from '@/components/app/card-feed';
 import { SAMPLE_CARDS } from '@/components/app/cards/card-types';
+import { Button } from '@/components/ui/button';
 import { useAgentCards } from '@/hooks/useAgentCards';
 import { cn } from '@/lib/shadcn/utils';
 
 const DEMO_FEED = process.env.NEXT_PUBLIC_DEMO_FEED === '1';
-
-const CHAT_MOTION_PROPS: MotionProps = {
-  variants: {
-    hidden: { opacity: 0, transition: { ease: 'easeOut', duration: 0.3 } },
-    visible: { opacity: 1, transition: { delay: 0.2, ease: 'easeOut', duration: 0.3 } },
-  },
-  initial: 'hidden',
-  animate: 'visible',
-  exit: 'hidden',
-};
 
 interface AgentStateLabel {
   label: string;
@@ -56,32 +47,38 @@ export interface AgentSessionView_01Props {
 }
 
 /**
- * Feed-dominant "meeting HUD": a slim status header, the live card feed as the
- * hero surface, and a slim control bar. The agent surfaces context cards here
- * while the meeting runs; it speaks only when it interjects or is addressed.
+ * Feed-dominant "meeting HUD". Header shows agent state + an explicit End-meeting
+ * button. The card feed is the hero. The footer is how you talk to the agent: a
+ * persistent "Ask tellmequick…" text box plus the mic toggle. The agent surfaces
+ * cards as the meeting runs and speaks only when it interjects or is addressed.
  */
 export function AgentSessionView_01({
   supportsChatInput = true,
-  supportsVideoInput = true,
-  supportsScreenShare = true,
   ref,
   className,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  supportsVideoInput,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  supportsScreenShare,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  isPreConnectBufferEnabled,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  preConnectMessage,
   ...props
 }: React.ComponentProps<'section'> & AgentSessionView_01Props) {
   const session = useSessionContext();
-  const { messages } = useSessionMessages(session);
   const { state: agentState } = useAgent();
-  const [chatOpen, setChatOpen] = useState(false);
 
   const liveCards = useAgentCards();
   const cards = liveCards.length > 0 ? liveCards : DEMO_FEED ? SAMPLE_CARDS : [];
 
-  const controls: AgentControlBarControls = {
-    leave: true,
+  // The footer mic toggle only — typing is the AskInput; ending is the header button.
+  const micOnly: AgentControlBarControls = {
+    leave: false,
     microphone: true,
-    chat: supportsChatInput,
-    camera: supportsVideoInput,
-    screenShare: supportsScreenShare,
+    chat: false,
+    camera: false,
+    screenShare: false,
   };
 
   const status = stateLabel(agentState);
@@ -92,7 +89,7 @@ export function AgentSessionView_01({
       className={cn('bg-background z-10 flex h-full w-full flex-col overflow-hidden', className)}
       {...props}
     >
-      {/* Status header */}
+      {/* Status header + end meeting */}
       <header className="border-border/60 flex items-center gap-3 border-b px-4 py-3 md:px-6">
         <span className="flex items-center gap-2">
           <span className="relative flex size-2.5 items-center justify-center">
@@ -112,44 +109,40 @@ export function AgentSessionView_01({
           </span>
         </span>
         <span className="grow" />
-        <span className="text-muted-foreground hidden text-xs sm:inline">
-          Say <span className="text-foreground font-medium">“tellmequick”</span> to ask
-        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => session.end()}
+          className="text-destructive hover:text-destructive gap-1.5"
+        >
+          <PhoneOff className="size-3.5" />
+          End meeting
+        </Button>
       </header>
 
       {/* Hero: the live card feed */}
       <div className="relative min-h-0 flex-1">
         <CardFeed cards={cards} className="mx-auto h-full w-full max-w-2xl px-4 py-4" />
-
-        {/* Optional chat transcript overlay */}
-        <AnimatePresence>
-          {chatOpen && (
-            <motion.div
-              {...CHAT_MOTION_PROPS}
-              className="bg-background/95 absolute inset-0 z-20 flex flex-col backdrop-blur"
-            >
-              <AgentChatTranscript
-                agentState={agentState}
-                messages={messages}
-                className="mx-auto w-full max-w-2xl [&_.is-user>div]:rounded-[22px] [&>div>div]:px-4 [&>div>div]:py-4 md:[&>div>div]:px-6"
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
-      {/* Control bar */}
-      <div className="border-border/60 border-t px-3 py-3 md:px-12">
-        <div className="mx-auto max-w-2xl">
+      {/* Footer: talk to the agent — type or use the mic */}
+      <div className="border-border/60 border-t px-3 py-3 md:px-6">
+        <div className="mx-auto flex max-w-2xl items-center gap-2">
+          {supportsChatInput && <AskInput className="grow" />}
           <AgentControlBar
             variant="livekit"
-            controls={controls}
-            isChatOpen={chatOpen}
+            controls={micOnly}
+            isChatOpen={false}
             isConnected={session.isConnected}
             onDisconnect={session.end}
-            onIsChatOpenChange={setChatOpen}
+            onIsChatOpenChange={() => {}}
+            className="shrink-0"
           />
         </div>
+        <p className="text-muted-foreground mx-auto mt-2 max-w-2xl text-center text-[11px]">
+          Type above, or just say <span className="text-foreground font-medium">“tellmequick”</span>{' '}
+          in the meeting to ask out loud.
+        </p>
       </div>
     </section>
   );

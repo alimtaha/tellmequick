@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/shadcn/utils';
 import { CardShell } from './card-shell';
-import type { AgentCard, CardSource } from './card-types';
+import { type AgentCard, type CardSource, cleanPrompt } from './card-types';
 import { VizChart } from './viz-card';
 
 function SourceList({ sources }: { sources: CardSource[] }) {
@@ -52,6 +52,7 @@ export function AgentCardView({ card, now }: { card: AgentCard; now: number }) {
           kind="context"
           ts={card.ts}
           now={now}
+          prompt={cleanPrompt(card.query)}
           headerRight={
             typeof card.timeTakenMs === 'number' ? (
               <span className="text-muted-foreground/70 font-mono text-[11px] tabular-nums">
@@ -60,9 +61,6 @@ export function AgentCardView({ card, now }: { card: AgentCard; now: number }) {
             ) : undefined
           }
         >
-          {card.query && (
-            <p className="text-muted-foreground/80 mb-1 text-xs italic">“{card.query}”</p>
-          )}
           <p className="text-[15px] leading-snug font-medium">{card.answer}</p>
           <SourceList sources={card.sources} />
         </CardShell>
@@ -70,7 +68,7 @@ export function AgentCardView({ card, now }: { card: AgentCard; now: number }) {
 
     case 'transcription':
       return (
-        <CardShell kind="transcription" ts={card.ts} now={now}>
+        <CardShell kind="transcription" ts={card.ts} now={now} prompt={cleanPrompt(card.query)}>
           <p className={cn('text-[15px] leading-snug')}>{card.answer}</p>
         </CardShell>
       );
