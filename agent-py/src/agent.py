@@ -2,6 +2,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,15 +12,17 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    ChatContext,
+    ChatMessage,
     JobContext,
     JobProcess,
     RunContext,
+    StopResponse,
     cli,
     function_tool,
     inference,
     room_io,
 )
-from livekit.agents.llm import ChatMessage
 from livekit.plugins import ai_coustics, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from moss import DocumentInfo, MossClient, QueryOptions
@@ -41,6 +44,23 @@ ALL_INDEXES = [KNOWLEDGE_INDEX, SLACK_INDEX, MEETINGS_INDEX]
 # Single-group demo scope. The frontend can override via dispatch metadata.
 DEFAULT_GROUP_ID = os.getenv("DEFAULT_GROUP_ID", "acme-finance")
 
+# --- Interaction model: display-first, voice-on-address ----------------------
+# The agent listens quietly and surfaces context CARDS on the display without
+# speaking (ambient). It only SPEAKS when addressed by name. See README/PRD.
+#
+# Wake names that switch the agent from ambient (display-only) to addressed
+# (spoken reply). STT usually renders "tellmequick" as "tell me quick".
+WAKE_NAMES = [
+    n.strip().lower()
+    for n in os.getenv("AGENT_WAKE_NAMES", "tellmequick,tell me quick").split(",")
+    if n.strip()
+]
+# Ambient cards only surface when a hit scores at/above this. Tune per corpus —
+# too low floods the display, too high never surfaces. Logged on each turn.
+AMBIENT_SCORE_THRESHOLD = float(os.getenv("AMBIENT_SCORE_THRESHOLD", "0.3"))
+# How many recently-surfaced snippets to keep for "explain what's on screen".
+RECENT_CONTEXT_MAX = 6
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -49,6 +69,17 @@ def _now_iso() -> str:
 def _now_epoch() -> float:
     # Epoch SECONDS — the frontend (useMossContextEvents.ts) multiplies by 1000.
     return datetime.now(timezone.utc).timestamp()
+
+
+def is_addressed(text: str, wake_names: list[str] = WAKE_NAMES) -> bool:
+    """True if the user explicitly called the agent by name in this turn.
+
+    Punctuation-insensitive, case-insensitive substring match so "Tellmequick,"
+    and "tell me quick" both trigger.
+    """
+    norm = re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return any(name and name in norm for name in wake_names)
 
 
 @dataclass
@@ -70,6 +101,7 @@ class WorkingMemory:
     group_id: str
     turns: list[tuple[str, str]] = field(default_factory=list)  # (role, text)
     surfaced_card_ids: set[str] = field(default_factory=set)
+    recent_context: list[str] = field(default_factory=list)  # last surfaced snippets
     pending_decisions: list[Decision] = field(default_factory=list)
 
 
@@ -135,11 +167,13 @@ def build_meeting_docs(
 
 
 class Assistant(Agent):
-    """tellmequick: a real-time decision & context copilot.
+    """tellmequick: a display-first, real-time decision & context copilot.
 
-    Listens to the meeting, retrieves relevant prior context across three Moss
-    indexes (read-only), and surfaces it as cards while speaking briefly. Decisions
-    flagged in the room are persisted post-meeting (no Moss writes mid-meeting).
+    Listens quietly. On each turn it retrieves relevant prior context across three
+    Moss indexes (read-only) and surfaces it as cards on the display WITHOUT
+    speaking — so it never interrupts the meeting. It only speaks when addressed by
+    name, at which point it explains what's on screen and answers. Decisions flagged
+    while addressed are persisted post-meeting (no Moss writes mid-meeting).
     """
 
     def __init__(
@@ -151,40 +185,34 @@ class Assistant(Agent):
     ) -> None:
         super().__init__(
             # LLM runs on LiveKit Inference (no provider key). STT/TTS are on the
-            # AgentSession. https://docs.livekit.io/agents/models/
+            # AgentSession. The LLM only runs when the agent is addressed by name.
             llm=inference.LLM(model="openai/gpt-5.2-chat-latest"),
             instructions=textwrap.dedent(
                 """\
                 You are tellmequick, a real-time context copilot in a live meeting.
-                Your job is to surface relevant prior context — documents, Slack
-                discussions, and decisions from past meetings — exactly when it's
-                useful, and to remember decisions the team makes.
+                You are DISPLAY-FIRST: most of the time you stay silent and surface
+                context cards on screen. You only speak when a participant calls you
+                by name — which has just happened now.
 
-                # Retrieval (very important)
+                Because you were addressed, give a brief spoken reply:
 
-                - Call `search_context` BEFORE you answer ANY time someone refers to
-                  prior discussion, a specific document or filing, a past decision, a
-                  number, or asks "what did we say / decide / agree". When in doubt,
-                  search. Ground your reply in what it returns.
-                - If `search_context` returns nothing relevant, say so plainly. Never
-                  invent prior context, decisions, figures, or sources.
-                - Do not call `search_context` for pure small talk or logistics
-                  ("can you hear me", "let's start") — only for real context needs.
-
-                # Decisions
-
+                - If context is already shown on screen (it will be provided to you as
+                  an assistant message), explain those results concisely and answer
+                  what was asked.
+                - For anything not already on screen, call `search_context` to look it
+                  up, then answer grounded in what it returns. Never invent context,
+                  decisions, figures, or sources — if nothing relevant is found, say so.
                 - When the team concludes or agrees on something, call `mark_decision`
                   with a one-sentence summary, a short `topic` key, and the `owner` if
-                  named. This is captured now and saved after the meeting ends.
-                - You do not save anything to long-term memory during the meeting; do
-                  not claim that you have. Decisions are persisted when the meeting ends.
+                  named. It is captured now and saved after the meeting ends; do not
+                  claim anything is saved to long-term memory during the meeting.
 
                 # Output rules (you are speaking via TTS)
 
                 - Plain text only. No markdown, lists, tables, code, or emojis.
-                - Be brief: one to three sentences. When you surface context, say where
-                  it came from in passing ("from a Slack thread in May", "decided in the
-                  May review") — the full citation appears on screen.
+                - Be brief: one to three sentences. Mention the source in passing
+                  ("from a Slack thread in May", "decided in the May review") — the full
+                  citation is already on screen.
                 - Don't read out URLs or internal IDs.
 
                 # Guardrails
@@ -204,8 +232,8 @@ class Assistant(Agent):
 
     async def on_enter(self) -> None:
         # Preload all three indexes so the first retrieval is fast. Guarded: log and
-        # continue on failure so tools can retry the load on use. Greeting is
-        # triggered from the entrypoint (after connect), per the LiveKit pattern.
+        # continue on failure so retrieval can retry the load on use. No spoken
+        # greeting — the agent joins silently (display-first).
         if not self._indexes_loaded:
             try:
                 await self._moss.load_indexes(ALL_INDEXES)
@@ -213,6 +241,101 @@ class Assistant(Agent):
                 logger.info("Loaded Moss indexes: %s", ", ".join(ALL_INDEXES))
             except Exception:
                 logger.exception("Failed to preload Moss indexes; will retry on use")
+
+    # ---- the interaction gate -------------------------------------------------
+
+    async def on_user_turn_completed(
+        self, turn_ctx: ChatContext, new_message: ChatMessage
+    ) -> None:
+        """Runs after every user turn, before any reply. This is the display-first
+        switch: ambient turns surface a card and abort the spoken reply; addressed
+        turns inject what's on screen and let the LLM speak."""
+        text = new_message.text_content or ""
+        self.record_turn("user", text)
+
+        if is_addressed(text):
+            # Addressed by name → speak. Give the LLM whatever is already on screen
+            # so it can "explain the results it displayed", then let the reply run.
+            if self._wm.recent_context:
+                turn_ctx.add_message(
+                    role="assistant",
+                    content=(
+                        "Context already shown on screen (most recent first):\n- "
+                        + "\n- ".join(reversed(self._wm.recent_context))
+                    ),
+                )
+            return  # do not StopResponse → the LLM generates a spoken reply
+
+        # Ambient → surface a card if something is relevant, but stay silent.
+        await self._ambient_surface(text)
+        raise StopResponse()
+
+    # ---- retrieval & surfacing ------------------------------------------------
+
+    async def _ambient_surface(self, text: str) -> None:
+        """Quietly surface a card if this turn strongly matches stored context.
+        Score-gated and deduped so the display doesn't flash on every sentence."""
+        if not text.strip():
+            return
+        try:
+            result = await self._moss.query_multi_index(
+                ALL_INDEXES, text, self._query_options(top_k=3)
+            )
+        except Exception:
+            logger.exception("ambient query failed")
+            return
+        docs = getattr(result, "docs", None) or []
+        top = max((getattr(d, "score", None) or 0.0 for d in docs), default=0.0)
+        relevant = [
+            d
+            for d in docs
+            if (getattr(d, "score", None) or 0.0) >= AMBIENT_SCORE_THRESHOLD
+        ]
+        logger.info(
+            "ambient turn: top_score=%.3f threshold=%.3f surfacing=%d",
+            top,
+            AMBIENT_SCORE_THRESHOLD,
+            len(relevant),
+        )
+        if relevant:
+            await self._surface(
+                text, relevant, getattr(result, "time_taken_ms", None), dedup=True
+            )
+
+    def _query_options(self, top_k: int) -> QueryOptions:
+        return QueryOptions(
+            top_k=top_k,
+            filter={"field": "group_id", "condition": {"$eq": self._group_id}},
+        )
+
+    async def _surface(
+        self, query: str, docs: list, time_taken_ms, *, dedup: bool
+    ) -> list:
+        """Record + publish a set of result docs as a card. With dedup=True, drop
+        docs already surfaced this meeting (ambient); with dedup=False, surface all
+        (an explicit search_context call the user asked for)."""
+        if dedup:
+            fresh = [
+                d
+                for d in docs
+                if getattr(d, "id", None) not in self._wm.surfaced_card_ids
+            ]
+        else:
+            fresh = list(docs)
+        if not fresh:
+            return []
+        for d in fresh:
+            doc_id = getattr(d, "id", None)
+            if doc_id:
+                self._wm.surfaced_card_ids.add(doc_id)
+            snippet = (getattr(d, "text", "") or "").strip()
+            if snippet:
+                self._wm.recent_context.append(snippet)
+        # cap recent context
+        if len(self._wm.recent_context) > RECENT_CONTEXT_MAX:
+            self._wm.recent_context = self._wm.recent_context[-RECENT_CONTEXT_MAX:]
+        await self._publish_context(query, fresh, time_taken_ms)
+        return fresh
 
     # ---- working memory -------------------------------------------------------
 
@@ -263,51 +386,32 @@ class Assistant(Agent):
             },
         )
 
-    # ---- tools ----------------------------------------------------------------
+    # ---- tools (only reachable when addressed) --------------------------------
 
     @function_tool()
     async def search_context(self, context: RunContext, query: str) -> str:
         """Search the team's shared context for information relevant to the discussion.
 
         Searches all sources at once — documents and filings, Slack messages, and
-        decisions from past meetings. Call this before answering anything that refers
-        to prior discussion, a document, a past decision, or a specific figure.
+        decisions from past meetings. Use it to answer the question you were just
+        asked when the answer isn't already on screen.
 
         Args:
             query: What to look up, in natural language.
         """
         try:
             result = await self._moss.query_multi_index(
-                ALL_INDEXES,
-                query,
-                QueryOptions(
-                    top_k=6,
-                    filter={
-                        "field": "group_id",
-                        "condition": {"$eq": self._group_id},
-                    },
-                ),
+                ALL_INDEXES, query, self._query_options(top_k=6)
             )
         except Exception:
             logger.exception("search_context query failed")
             return "I couldn't search the context store just now."
 
-        all_docs = getattr(result, "docs", None) or []
-        # Dedup: drop anything already surfaced this meeting (don't re-flash a card).
-        fresh = [
-            d
-            for d in all_docs
-            if getattr(d, "id", None) not in self._wm.surfaced_card_ids
-        ]
-        for d in fresh:
-            doc_id = getattr(d, "id", None)
-            if doc_id:
-                self._wm.surfaced_card_ids.add(doc_id)
-
-        await self._publish_context(
-            query, fresh, getattr(result, "time_taken_ms", None)
+        docs = getattr(result, "docs", None) or []
+        # Explicit ask → surface all (no dedup); the user wants these results now.
+        fresh = await self._surface(
+            query, docs, getattr(result, "time_taken_ms", None), dedup=False
         )
-
         snippets = [(getattr(d, "text", "") or "").strip() for d in fresh]
         snippets = [s for s in snippets if s]
         if not snippets:
@@ -423,7 +527,9 @@ async def my_agent(ctx: JobContext):
         room=ctx.room, group_id=group_id, conversation_id=ctx.room.name
     )
 
-    # Voice pipeline on LiveKit Inference + the LiveKit turn detector.
+    # Voice pipeline on LiveKit Inference + the LiveKit turn detector. TTS is wired,
+    # but the agent only actually speaks when addressed by name (see
+    # Assistant.on_user_turn_completed); ambient turns abort the reply.
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="multi"),
         tts=inference.TTS(
@@ -433,14 +539,6 @@ async def my_agent(ctx: JobContext):
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )
-
-    # Capture finalized turns into working memory (in-process; feeds nothing on the
-    # hot path — used only by the post-meeting distillation and dedup).
-    @session.on("conversation_item_added")
-    def _on_item(ev):
-        item = ev.item
-        if isinstance(item, ChatMessage):
-            assistant.record_turn(item.role, item.text_content or "")
 
     # Persist decisions when the meeting ends (room empties). Shutdown hooks must
     # finish within ~10s (tunable via shutdown_process_timeout in server options).
@@ -458,15 +556,8 @@ async def my_agent(ctx: JobContext):
         ),
     )
 
+    # Join silently — display-first, no spoken greeting that would interrupt.
     await ctx.connect()
-
-    await session.generate_reply(
-        instructions=(
-            "Greet the room warmly in one sentence, introduce yourself as their "
-            "context copilot, and say you'll surface relevant prior context as the "
-            "discussion goes. Do not ask a question."
-        )
-    )
 
 
 if __name__ == "__main__":

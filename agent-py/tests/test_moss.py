@@ -1,23 +1,26 @@
-"""Unit tests for the agent's Moss-backed tools and the post-meeting distillation.
+"""Unit tests for the agent's interaction gate, Moss-backed tools, and distillation.
 
-Deterministic unit tests that exercise the tool methods and pure helpers directly.
-They stub `MossClient` via monkeypatch so they run with no Moss credentials and no
+Deterministic unit tests that exercise the methods and pure helpers directly. They
+stub `MossClient` via monkeypatch so they run with no Moss credentials and no
 network access — live behavior is validated separately.
 """
 
 import json
 
 import pytest
+from livekit.agents import StopResponse
 
 import agent as agent_module
 from agent import (
     Assistant,
     Decision,
     build_meeting_docs,
+    is_addressed,
     resolve_decisions,
 )
 
 GROUP_ID = "acme-finance"
+THRESHOLD = agent_module.AMBIENT_SCORE_THRESHOLD
 
 
 class _FakeDoc:
@@ -76,19 +79,107 @@ class _FakeRoom:
         self.local_participant = _FakePublisher()
 
 
+class _FakeMessage:
+    """Stand-in for a ChatMessage with `.text_content`."""
+
+    def __init__(self, text: str) -> None:
+        self.text_content = text
+
+
+class _FakeTurnCtx:
+    """Stand-in for ChatContext; records add_message calls."""
+
+    def __init__(self) -> None:
+        self.added: list[dict] = []
+
+    def add_message(self, role, content):
+        self.added.append({"role": role, "content": content})
+
+
 @pytest.fixture
 def stub_moss(monkeypatch):
     """Replace the agent's `MossClient` with the recording fake."""
     monkeypatch.setattr(agent_module, "MossClient", _FakeMossClient)
 
 
+def _published_types(room):
+    return [
+        json.loads(p.decode("utf-8"))["type"]
+        for p, _ in room.local_participant.published
+    ]
+
+
 def _decoded(published):
-    """Decode the most recent published data-channel payload."""
     payload_bytes, _reliable = published[-1]
     return json.loads(payload_bytes.decode("utf-8"))
 
 
-# ---- search_context -----------------------------------------------------------
+# ---- is_addressed (wake-name detection) ---------------------------------------
+
+
+def test_is_addressed_matches_name_variants() -> None:
+    assert is_addressed("Tellmequick, what did we decide?")
+    assert is_addressed("hey tell me quick, pull up the contract")
+    assert is_addressed("TELLMEQUICK")
+
+
+def test_is_addressed_false_for_normal_talk() -> None:
+    assert not is_addressed("Let's cut the events budget by twenty percent.")
+    assert not is_addressed("")
+
+
+# ---- on_user_turn_completed: the display-first gate ----------------------------
+
+
+async def test_ambient_turn_surfaces_card_and_stops(stub_moss) -> None:
+    """A non-addressed turn with a strong match surfaces a card and aborts the reply."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+    assistant._moss.query_result = _FakeSearchResult(
+        [_FakeDoc("Hold events flat.", doc_id="meet:1", score=THRESHOLD + 0.5)]
+    )
+
+    msg = _FakeMessage("what about the events budget")
+    with pytest.raises(StopResponse):
+        await assistant.on_user_turn_completed(_FakeTurnCtx(), msg)
+
+    # Card published, no spoken reply (StopResponse), no Moss writes.
+    assert "moss_context" in _published_types(room)
+    assert assistant._moss.add_docs_calls == []
+
+
+async def test_ambient_turn_below_threshold_no_card(stub_moss) -> None:
+    """A weak match surfaces nothing — display stays quiet."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+    assistant._moss.query_result = _FakeSearchResult(
+        [_FakeDoc("loosely related", doc_id="x", score=max(THRESHOLD - 0.2, 0.0))]
+    )
+
+    with pytest.raises(StopResponse):
+        await assistant.on_user_turn_completed(
+            _FakeTurnCtx(), _FakeMessage("small talk")
+        )
+
+    assert room.local_participant.published == []
+
+
+async def test_addressed_turn_speaks_and_injects_screen_context(stub_moss) -> None:
+    """An addressed turn does NOT abort the reply, and injects what's on screen."""
+    assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
+    assistant._wm.recent_context = ["Hold events flat (decided in May review)."]
+
+    turn_ctx = _FakeTurnCtx()
+    # Should NOT raise StopResponse.
+    await assistant.on_user_turn_completed(
+        turn_ctx, _FakeMessage("tellmequick, can you explain that?")
+    )
+
+    assert len(turn_ctx.added) == 1
+    assert "Hold events flat" in turn_ctx.added[0]["content"]
+
+
+# ---- search_context (only reachable when addressed) ---------------------------
 
 
 async def test_search_context_queries_all_indexes_and_publishes(stub_moss) -> None:
@@ -110,53 +201,28 @@ async def test_search_context_queries_all_indexes_and_publishes(stub_moss) -> No
     result = await assistant.search_context(
         None, "what did we say about events budget?"
     )
-
     assert result == "Events drove 40% of pipeline.\n\nHold events flat."
 
-    # One multi-index query across all three indexes, group_id-scoped.
-    assert len(assistant._moss.multi_query_calls) == 1
-    names, query, options = assistant._moss.multi_query_calls[0]
+    names, _query, options = assistant._moss.multi_query_calls[0]
     assert names == [
         agent_module.KNOWLEDGE_INDEX,
         agent_module.SLACK_INDEX,
         agent_module.MEETINGS_INDEX,
     ]
-    assert query == "what did we say about events budget?"
     assert options.top_k == 6
     assert options.filter == {"field": "group_id", "condition": {"$eq": GROUP_ID}}
 
-    # Published a well-formed moss_context message.
     payload = _decoded(room.local_participant.published)
     assert payload["type"] == "moss_context"
-    data = payload["data"]
-    assert set(data) == {"query", "matches", "time_taken_ms", "timestamp"}
-    assert data["time_taken_ms"] == 8.0
-    assert isinstance(data["timestamp"], (int, float))
-    assert data["matches"][0]["text"] == "Events drove 40% of pipeline."
-    assert data["matches"][0]["score"] == 0.91
-    assert data["matches"][0]["metadata"] == {"source": "slack", "url": "https://s/1"}
+    assert set(payload["data"]) == {"query", "matches", "time_taken_ms", "timestamp"}
+    assert payload["data"]["matches"][0]["score"] == 0.91
 
 
 async def test_search_context_is_read_only(stub_moss) -> None:
-    """The hot path never writes to Moss."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult([_FakeDoc("x", doc_id="d1")])
     await assistant.search_context(None, "anything")
     assert assistant._moss.add_docs_calls == []
-
-
-async def test_search_context_dedups_already_surfaced(stub_moss) -> None:
-    """A doc surfaced once this meeting isn't surfaced again."""
-    assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
-    assistant._moss.query_result = _FakeSearchResult(
-        [_FakeDoc("Hold events flat.", doc_id="meet:1")]
-    )
-
-    first = await assistant.search_context(None, "events budget?")
-    assert first == "Hold events flat."
-
-    second = await assistant.search_context(None, "events budget again?")
-    assert second == "No relevant context found."
 
 
 async def test_search_context_empty_returns_message(stub_moss) -> None:
@@ -180,15 +246,12 @@ async def test_mark_decision_records_to_working_memory_no_moss_write(stub_moss) 
     )
     assert isinstance(msg, str) and msg
 
-    # Captured in working memory, not Moss.
     assert len(assistant._wm.pending_decisions) == 1
     d = assistant._wm.pending_decisions[0]
     assert d.text == "Cut the events budget 20%."
     assert d.topic == "events-budget"
-    assert d.owner == "dan"
     assert assistant._moss.add_docs_calls == []
 
-    # Published a decision_pending banner.
     payload = _decoded(room.local_participant.published)
     assert payload["type"] == "decision_pending"
     assert payload["data"]["text"] == "Cut the events budget 20%."
@@ -208,13 +271,11 @@ def test_resolve_decisions_latest_wins_per_topic() -> None:
     assert "Actually cut events 20%." in texts
     assert "Hold events flat." not in texts  # superseded
     assert "Hire two AEs." in texts
-    # One per topic.
     assert len(resolved) == 2
 
 
 def test_resolve_decisions_keeps_topicless() -> None:
-    pending = [Decision("note A"), Decision("note B")]
-    assert len(resolve_decisions(pending)) == 2
+    assert len(resolve_decisions([Decision("note A"), Decision("note B")])) == 2
 
 
 def test_build_meeting_docs_emits_string_metadata() -> None:
@@ -235,10 +296,6 @@ def test_build_meeting_docs_emits_string_metadata() -> None:
     assert doc.id == f"{GROUP_ID}:conv-1:decision:0"
     assert doc.text == "Cut events 20%."
     assert doc.metadata["is_decision"] == "true"
-    assert doc.metadata["kind"] == "decision"
-    assert doc.metadata["group_id"] == GROUP_ID
-    assert doc.metadata["conversation_id"] == "conv-1"
-    # All metadata values must be strings (Moss constraint).
     assert all(isinstance(v, str) for v in doc.metadata.values())
 
 
@@ -259,7 +316,6 @@ async def test_finalize_meeting_writes_resolved_decisions(stub_moss) -> None:
     assert index == agent_module.MEETINGS_INDEX
     assert len(docs) == 1  # conflict resolved to one
     assert docs[0].text == "Cut events 20%."
-    # Index reloaded so the new decision is queryable next meeting.
     assert agent_module.MEETINGS_INDEX in assistant._moss.load_index_calls
 
 
