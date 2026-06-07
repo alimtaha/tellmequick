@@ -39,7 +39,13 @@ function parse(payload: Uint8Array): AgentCard | null {
   const data = message.data;
   const tsRaw = typeof data.timestamp === 'number' ? data.timestamp : Date.now() / 1000;
   const ts = tsRaw * 1000;
-  const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  // Stable per-turn id from the agent (so streamed partials update one card);
+  // fall back to a generated id for messages without one.
+  const id =
+    typeof data.id === 'string' && data.id
+      ? data.id
+      : `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const streaming = data.streaming === true;
 
   switch (message.type) {
     case 'moss_context': {
@@ -56,10 +62,11 @@ function parse(payload: Uint8Array): AgentCard | null {
           query,
           sources,
           timeTakenMs: typeof data.time_taken_ms === 'number' ? data.time_taken_ms : null,
+          streaming,
         };
       }
       if (!answer) return null;
-      return { id, ts, kind: 'transcription', answer, query };
+      return { id, ts, kind: 'transcription', answer, query, streaming };
     }
     case 'decision_pending': {
       const text = typeof data.text === 'string' ? data.text : '';
@@ -103,7 +110,17 @@ export function useAgentCards(): AgentCard[] {
     const onData = (payload: Uint8Array) => {
       const card = parse(payload);
       if (!card) return;
-      setCards((prev) => [card, ...prev].slice(0, MAX_CARDS));
+      setCards((prev) => {
+        // Update one card in place if we've seen its id (streamed partials/final);
+        // otherwise prepend it as a new, newest-first entry.
+        const idx = prev.findIndex((c) => c.id === card.id);
+        if (idx >= 0) {
+          const next = prev.slice();
+          next[idx] = card;
+          return next;
+        }
+        return [card, ...prev].slice(0, MAX_CARDS);
+      });
     };
     room.on(RoomEvent.DataReceived, onData);
     return () => {

@@ -6,6 +6,7 @@ import os
 import random
 import re
 import textwrap
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -102,6 +103,16 @@ def is_addressed(text: str, wake_names: list[str] = WAKE_NAMES) -> bool:
     return any(name and name in norm for name in wake_names)
 
 
+def _chunk_text(chunk) -> str | None:
+    """Extract the text delta from an llm_node chunk (a plain str or a ChatChunk
+    with `.delta.content`). Returns None for tool-call / empty chunks."""
+    if isinstance(chunk, str):
+        return chunk or None
+    delta = getattr(chunk, "delta", None)
+    content = getattr(delta, "content", None) if delta is not None else None
+    return content or None
+
+
 @dataclass
 class Decision:
     """A decision flagged live during a meeting, captured in working memory."""
@@ -126,6 +137,10 @@ class WorkingMemory:
     # Per-turn buffer: sources + question paired with the spoken line into one card.
     pending_sources: list = field(default_factory=list)
     pending_query: str = ""
+    # Stable id for the current turn's card, so streamed partials + the final
+    # update the SAME card in the UI instead of stacking new ones.
+    turn_seq: int = 0
+    turn_card_id: str = ""
 
 
 def resolve_decisions(pending: list[Decision]) -> list[Decision]:
@@ -272,6 +287,9 @@ class Assistant(Agent):
         reply streams after); otherwise → stay silent (no LLM call)."""
         text = new_message.text_content or ""
         self.record_turn("user", text)
+        # New stable card id for this turn (streamed partials + final share it).
+        self._wm.turn_seq += 1
+        self._wm.turn_card_id = f"{self._wm.conversation_id}:{self._wm.turn_seq}"
 
         if is_addressed(text):
             # Explicit address → answer. Quick filler, then the pipeline answers.
@@ -354,6 +372,34 @@ class Assistant(Agent):
         except Exception:
             logger.debug("could not play filler (no active session?)")
 
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        """Stream the reply to the display card as it generates, so context shows up
+        token-by-token instead of all at once when speech finishes. Yields chunks
+        unchanged so STT→LLM→TTS is untouched; the final card is committed by the
+        conversation_item_added handler (same turn_card_id, so it updates in place)."""
+        acc = ""
+        last = 0.0
+        async for chunk in Agent.default.llm_node(
+            self, chat_ctx, tools, model_settings
+        ):
+            delta = _chunk_text(chunk)
+            if delta:
+                acc += delta
+                now = time.monotonic()
+                # Throttle: ~7 updates/sec is plenty for a smoothly growing card.
+                if now - last >= 0.15 and acc.strip():
+                    last = now
+                    with contextlib.suppress(Exception):
+                        await self._publish_context(
+                            self._wm.pending_query or "(interjection)",
+                            self._wm.pending_sources,
+                            None,
+                            answer=acc.strip(),
+                            card_id=self._wm.turn_card_id,
+                            streaming=True,
+                        )
+            yield chunk
+
     # ---- retrieval helpers ----------------------------------------------------
 
     def _query_options(self, top_k: int) -> QueryOptions:
@@ -383,8 +429,14 @@ class Assistant(Agent):
         if not answer:
             return
         self._mark_surfaced(sources, answer)
+        # Final update for this turn's card (same id as the streamed partials);
+        # streaming=False clears the UI "typing" state.
         await self._publish_context(
-            self._wm.pending_query or "(interjection)", sources, None, answer=answer
+            self._wm.pending_query or "(interjection)",
+            sources,
+            None,
+            answer=answer,
+            card_id=self._wm.turn_card_id,
         )
 
     # ---- working memory -------------------------------------------------------
@@ -409,14 +461,22 @@ class Assistant(Agent):
             logger.exception("Failed to publish %s data", type_)
 
     async def _publish_context(
-        self, query: str, docs: list, time_taken_ms, answer: str | None = None
+        self,
+        query: str,
+        docs: list,
+        time_taken_ms,
+        answer: str | None = None,
+        card_id: str | None = None,
+        streaming: bool = False,
     ) -> None:
         """Publish a `moss_context` message for the frontend context panel.
 
         Payload shape is contractual — the frontend parser
         (frontend hooks/useMossContextEvents.ts) depends on these keys. `answer` is
         the spoken line shown as the card headline; `matches` are the supporting
-        sources for citation. `timestamp` is epoch SECONDS (frontend multiplies x1000).
+        sources for citation. `id` lets the frontend update one card in place as the
+        reply streams; `streaming` flags an in-progress (partial) update. `timestamp`
+        is epoch SECONDS (frontend multiplies x1000).
         """
         matches: list[dict] = []
         for doc in docs:
@@ -437,6 +497,10 @@ class Assistant(Agent):
         }
         if answer is not None:
             data["answer"] = answer
+        if card_id:
+            data["id"] = card_id
+        if streaming:
+            data["streaming"] = True
         await self._publish("moss_context", data)
 
     # ---- tools ----------------------------------------------------------------

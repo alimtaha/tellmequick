@@ -43,6 +43,16 @@ function Chip({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** A blinking caret shown while the agent's reply is still streaming in. */
+function StreamCursor() {
+  return (
+    <span
+      aria-hidden
+      className="bg-foreground/60 ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse"
+    />
+  );
+}
+
 /** Renders a single feed card according to its kind. */
 export function AgentCardView({ card, now }: { card: AgentCard; now: number }) {
   switch (card.kind) {
@@ -61,7 +71,10 @@ export function AgentCardView({ card, now }: { card: AgentCard; now: number }) {
             ) : undefined
           }
         >
-          <p className="text-[15px] leading-snug font-medium">{card.answer}</p>
+          <p className="text-[15px] leading-snug font-medium">
+            {card.answer}
+            {card.streaming && <StreamCursor />}
+          </p>
           <SourceList sources={card.sources} />
         </CardShell>
       );
@@ -69,7 +82,10 @@ export function AgentCardView({ card, now }: { card: AgentCard; now: number }) {
     case 'transcription':
       return (
         <CardShell kind="transcription" ts={card.ts} now={now} prompt={cleanPrompt(card.query)}>
-          <p className={cn('text-[15px] leading-snug')}>{card.answer}</p>
+          <p className={cn('text-[15px] leading-snug')}>
+            {card.answer}
+            {card.streaming && <StreamCursor />}
+          </p>
         </CardShell>
       );
 

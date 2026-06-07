@@ -14,6 +14,7 @@ import agent as agent_module
 from agent import (
     Assistant,
     Decision,
+    _chunk_text,
     build_meeting_docs,
     is_addressed,
     resolve_decisions,
@@ -109,6 +110,27 @@ def _decoded(published):
 
 def _joined_injections(turn_ctx):
     return " ".join(m["content"] for m in turn_ctx.added)
+
+
+# ---- streaming helper ---------------------------------------------------------
+
+
+class _FakeDelta:
+    def __init__(self, content) -> None:
+        self.content = content
+
+
+class _FakeChunk:
+    def __init__(self, content) -> None:
+        self.delta = _FakeDelta(content)
+
+
+def test_chunk_text_extracts_deltas() -> None:
+    assert _chunk_text("hi") == "hi"
+    assert _chunk_text("") is None
+    assert _chunk_text(_FakeChunk("tok")) == "tok"
+    assert _chunk_text(_FakeChunk(None)) is None  # tool-call/empty chunk
+    assert _chunk_text(object()) is None
 
 
 # ---- is_addressed (wake-name detection) ---------------------------------------

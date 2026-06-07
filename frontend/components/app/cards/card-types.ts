@@ -36,12 +36,14 @@ export type ContextCard = Base & {
   query?: string;
   sources: CardSource[];
   timeTakenMs?: number | null;
+  streaming?: boolean; // reply still arriving (show a cursor)
 };
 
 export type TranscriptionCard = Base & {
   kind: 'transcription';
   answer: string; // what the agent said (no sources attached)
   query?: string;
+  streaming?: boolean;
 };
 
 export type DecisionCard = Base & {
