@@ -6,6 +6,7 @@ network access — live behavior is validated separately.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from livekit.agents import StopResponse
@@ -150,9 +151,9 @@ def test_is_addressed_false_for_normal_talk() -> None:
 # ---- on_user_turn_completed: the interjection gate ----------------------------
 
 
-async def test_proactive_strong_match_commits(stub_moss) -> None:
-    """A strong, fresh match does NOT abort the reply — it injects the context and
-    lets the pipeline LLM generate the grounded reply. Sources are buffered."""
+async def test_proactive_strong_match_defers(stub_moss) -> None:
+    """A strong, fresh match does NOT speak now — it holds the topic and starts the
+    grace timer, staying silent (StopResponse) to let the humans answer first."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
         [
@@ -165,20 +166,21 @@ async def test_proactive_strong_match_commits(stub_moss) -> None:
         ]
     )
 
-    turn_ctx = _FakeTurnCtx()
-    # Must not raise StopResponse — the agent commits to speaking.
-    await assistant.on_user_turn_completed(
-        turn_ctx, _FakeMessage("what about the events budget")
-    )
+    with pytest.raises(StopResponse):
+        await assistant.on_user_turn_completed(
+            _FakeTurnCtx(), _FakeMessage("what about the events budget")
+        )
 
-    assert len(assistant._wm.pending_sources) == 1
-    injected = _joined_injections(turn_ctx)
-    assert "Hold events flat." in injected
-    assert "Proactive" in injected
+    # Held the topic + scheduled a grace timer; did not speak.
+    assert assistant._pending is not None
+    assert assistant._pending["query"] == "what about the events budget"
+    assert len(assistant._pending["sources"]) == 1
+    assert assistant._grace_task is not None
+    assistant._cancel_grace()  # clean up the pending timer task
 
 
 async def test_proactive_weak_match_stays_silent(stub_moss) -> None:
-    """Below the interjection threshold → stay quiet, no LLM, nothing buffered."""
+    """Below the interjection threshold → stay quiet, no LLM, nothing held."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
         [_FakeDoc("loosely related", doc_id="x", score=max(THRESHOLD - 0.2, 0.0))]
@@ -189,11 +191,11 @@ async def test_proactive_weak_match_stays_silent(stub_moss) -> None:
         await assistant.on_user_turn_completed(turn_ctx, _FakeMessage("small talk"))
 
     assert turn_ctx.added == []
-    assert assistant._wm.pending_sources == []
+    assert assistant._pending is None
 
 
 async def test_proactive_already_surfaced_stays_silent(stub_moss) -> None:
-    """Don't re-interject on context already surfaced this meeting."""
+    """Don't re-hold context already surfaced this meeting."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._wm.surfaced_card_ids.add("meet:1")
     assistant._moss.query_result = _FakeSearchResult(
@@ -204,6 +206,7 @@ async def test_proactive_already_surfaced_stays_silent(stub_moss) -> None:
         await assistant.on_user_turn_completed(
             _FakeTurnCtx(), _FakeMessage("events budget again")
         )
+    assert assistant._pending is None
 
 
 async def test_addressed_turn_answers_and_injects_screen_context(stub_moss) -> None:
@@ -220,6 +223,48 @@ async def test_addressed_turn_answers_and_injects_screen_context(stub_moss) -> N
     injected = _joined_injections(turn_ctx)
     assert "Hold events flat" in injected
     assert "Addressed" in injected
+
+
+# ---- out-of-turn generation (gap fill + correction judge) ---------------------
+
+
+class _FakeAuxStream:
+    def __init__(self, text) -> None:
+        self._text = text
+
+    async def collect(self):
+        return SimpleNamespace(text=self._text)
+
+
+class _FakeAuxLLM:
+    def __init__(self, text) -> None:
+        self._text = text
+
+    def chat(self, chat_ctx=None):
+        return _FakeAuxStream(self._text)
+
+
+async def test_generate_grounded_returns_line_or_pass(stub_moss) -> None:
+    a = Assistant(group_id=GROUP_ID)
+    src = [
+        _FakeDoc(
+            "Revenue was $7.0B in 2025.", doc_id="k1", metadata={"source": "filing"}
+        )
+    ]
+
+    # Non-PASS reply → a spoken line (correction).
+    a._aux_llm = _FakeAuxLLM("Actually, 2025 revenue was $7.0B, per the 10-K.")
+    line = await a._generate_grounded(
+        agent_module.CORRECTION_SYSTEM, "2025 revenue?", "It was $2B", src
+    )
+    assert line and line.startswith("Actually,")
+
+    # PASS sentinel → stay silent.
+    a._aux_llm = _FakeAuxLLM("PASS")
+    assert (
+        await a._generate_grounded(agent_module.GAP_SYSTEM, "2025 revenue?", "", src)
+        is None
+    )
 
 
 # ---- search_context -----------------------------------------------------------

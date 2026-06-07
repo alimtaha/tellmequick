@@ -50,12 +50,12 @@ DEFAULT_GROUP_ID = os.getenv("DEFAULT_GROUP_ID", "acme-finance")
 # The one model — drives spoken replies AND proactive interjections.
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-5.2-chat-latest")
 
-# --- Interaction model: an interjecting "third participant" ------------------
-# The agent listens. After each turn one cheap Moss retrieval gates whether it
-# speaks. On a strong, fresh match it commits: it says a quick filler IMMEDIATELY
-# (masking generation latency) while its LLM produces the grounded reply, which
-# streams right after. Below the bar it stays silent (no LLM call). It also
-# answers when addressed by name.
+# --- Interaction model: a tactful "third participant" ------------------------
+# The agent listens. One cheap Moss retrieval after each turn gates whether it has
+# anything relevant. If so it does NOT jump in — it waits a short grace window for
+# the humans to answer. If the room stays silent it fills the gap; if a human
+# answers it stays quiet, UNLESS what they said contradicts the sources, in which
+# case it corrects them. It answers immediately only when addressed by name.
 WAKE_NAMES = [
     n.strip().lower()
     for n in os.getenv("AGENT_WAKE_NAMES", "tellmequick,tell me quick").split(",")
@@ -65,22 +65,40 @@ WAKE_NAMES = [
 # warrant. Tune per corpus; every turn logs the top score. Below the bar = instant
 # silence, no LLM call.
 INTERJECT_THRESHOLD = float(os.getenv("INTERJECT_THRESHOLD", "0.4"))
+# How long to wait for a human to answer before filling a silent gap. Cancelled the
+# instant a human starts speaking, so the agent yields the floor.
+INTERJECT_GRACE = float(os.getenv("INTERJECT_GRACE_S", "1.2"))
 # How many recently-surfaced results to keep for "explain what's on screen".
 RECENT_CONTEXT_MAX = 6
 
-# Quick fillers spoken the instant the agent commits to speaking, so it feels
-# responsive while the real reply generates in the background.
-FILLER_PROACTIVE = [
-    "Hmm, I think we touched on this — let me pull it up.",
-    "Actually, there's something relevant here — one second.",
-    "I recall we covered this; let me find it.",
-    "Hold on, I've got something on that.",
-]
+# Spoken immediately only when ADDRESSED by name — an explicit ask wants a fast ack.
 FILLER_ADDRESSED = [
     "Let me check that.",
     "One second, pulling that up.",
     "Let me look that up for you.",
 ]
+
+# Standalone-LLM prompts for out-of-turn speech. Each returns exactly "PASS" to
+# stay silent, so a non-PASS reply is the signal to actually speak.
+GAP_SYSTEM = textwrap.dedent(
+    """\
+    No one in the meeting answered the topic below. Using ONLY the grounded facts
+    provided, state the answer in ONE short spoken sentence, mentioning the source in
+    passing (e.g. "per the 10-K"). If the facts don't actually answer it, reply with
+    exactly: PASS
+    Plain text only.
+    """
+)
+CORRECTION_SYSTEM = textwrap.dedent(
+    """\
+    Someone in the meeting just made the statement below. Compare it to the grounded
+    facts. If the statement is factually wrong or contradicts the facts, reply with a
+    ONE-sentence spoken correction beginning with "Actually," and citing the source in
+    passing. If the statement is correct, consistent, or simply unrelated, reply with
+    exactly: PASS
+    Plain text only.
+    """
+)
 
 
 def _now_iso() -> str:
@@ -264,6 +282,13 @@ class Assistant(Agent):
         )
         self._wm = WorkingMemory(conversation_id=conversation_id, group_id=group_id)
         self._indexes_loaded = False
+        # Deferred-interjection state: a held topic awaiting the grace window, the
+        # timer task, a set of background tasks, and a standalone LLM for out-of-turn
+        # gap-fills / corrections (off the voice pipeline).
+        self._pending: dict | None = None
+        self._grace_task: asyncio.Task | None = None
+        self._tasks: set = set()
+        self._aux_llm = inference.LLM(model=LLM_MODEL)
 
     async def on_enter(self) -> None:
         # Preload all three indexes so the first retrieval is fast. Guarded: log and
@@ -282,17 +307,21 @@ class Assistant(Agent):
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
     ) -> None:
-        """Runs after every user turn, before any reply. Decides whether the agent
-        speaks: addressed → answer; strong fresh match → commit (filler now, grounded
-        reply streams after); otherwise → stay silent (no LLM call)."""
+        """Runs after every user turn. The agent doesn't jump in: addressed → answer;
+        a strong fresh match → hold it and wait a beat (the grace timer), staying
+        silent now; and if a held topic was just (mis)answered → judge + maybe correct."""
         text = new_message.text_content or ""
         self.record_turn("user", text)
-        # New stable card id for this turn (streamed partials + final share it).
         self._wm.turn_seq += 1
         self._wm.turn_card_id = f"{self._wm.conversation_id}:{self._wm.turn_seq}"
 
+        # A new turn arrived: stop any in-flight gap-fill; remember what was pending.
+        prev = self._pending
+        self._pending = None
+        self._cancel_grace()
+
         if is_addressed(text):
-            # Explicit address → answer. Quick filler, then the pipeline answers.
+            # Explicit address → answer immediately. Quick filler, then the pipeline.
             self._wm.pending_sources = []
             self._wm.pending_query = text
             self._say_filler(FILLER_ADDRESSED)
@@ -312,9 +341,14 @@ class Assistant(Agent):
                     "ambiguous, ask one short clarifying question."
                 ),
             )
-            return  # let the pipeline answer + speak
+            return  # answer immediately via the pipeline
 
-        # Proactive path: one cheap retrieval gates whether we even consider speaking.
+        # If the agent was holding context and a human just spoke to it, check (in the
+        # background) whether they got it wrong — and correct only if so.
+        if prev is not None:
+            self._spawn(self._maybe_correct(prev, text))
+
+        # Gate this turn: is there strong, fresh context worth holding?
         try:
             result = await self._moss.query_multi_index(
                 ALL_INDEXES, text, self._query_options(top_k=5)
@@ -333,31 +367,19 @@ class Assistant(Agent):
             INTERJECT_THRESHOLD,
             len(relevant),
         )
-        if not relevant:
-            raise StopResponse()  # nothing strong → stay quiet, no LLM call
-        if all(getattr(d, "id", None) in self._wm.surfaced_card_ids for d in relevant):
-            raise StopResponse()  # already surfaced this context — don't repeat
-
-        # Commit: acknowledge instantly, then generate the grounded reply in the
-        # background (it streams right after the filler).
-        self._wm.pending_sources = list(relevant)
-        self._wm.pending_query = text
-        self._say_filler(FILLER_PROACTIVE)
-        sources = "\n".join(
-            f"- ({(getattr(d, 'metadata', {}) or {}).get('source', '?')}) "
-            f"{(getattr(d, 'text', '') or '').strip()}"
-            for d in relevant
-        )
-        turn_ctx.add_message(
-            role="assistant",
-            content=(
-                f"[Proactive] Relevant prior context just surfaced:\n{sources}\n\n"
-                "In ONE short sentence, surface the most useful, non-obvious point "
-                "from this for what was just said. If what they need is genuinely "
-                "ambiguous, instead ask ONE short clarifying question."
-            ),
-        )
-        return  # let the pipeline generate + stream the reply
+        if relevant and not all(
+            getattr(d, "id", None) in self._wm.surfaced_card_ids for d in relevant
+        ):
+            # Hold it — wait the grace window for the humans to answer first.
+            self._pending = {
+                "query": text,
+                "sources": relevant,
+                "seq": self._wm.turn_seq,
+            }
+            self._grace_task = self._spawn(
+                self._grace_then_fill(self._pending, self._wm.turn_seq)
+            )
+        raise StopResponse()  # proactive never speaks immediately
 
     def _say_filler(self, fillers: list[str]) -> None:
         """Speak a quick filler immediately (non-blocking) so the agent feels
@@ -371,6 +393,90 @@ class Assistant(Agent):
             )
         except Exception:
             logger.debug("could not play filler (no active session?)")
+
+    # ---- deferred interjection (grace window + correction) --------------------
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Run a coroutine in the background, keeping a strong ref so it isn't GC'd."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    def _cancel_grace(self) -> None:
+        if self._grace_task is not None and not self._grace_task.done():
+            self._grace_task.cancel()
+        self._grace_task = None
+
+    def on_user_started_speaking(self) -> None:
+        """A human took the floor — hold any gap-fill (but keep the pending topic, so
+        the completed turn can still be judged for a wrong answer)."""
+        if self._grace_task is not None and not self._grace_task.done():
+            logger.info("user speaking — holding gap-fill")
+            self._cancel_grace()
+
+    async def _grace_then_fill(self, pending: dict, seq: int) -> None:
+        """After the grace window, if the room stayed silent, fill the gap out of turn."""
+        try:
+            await asyncio.sleep(INTERJECT_GRACE)
+        except asyncio.CancelledError:
+            return
+        if self._wm.turn_seq != seq or self._pending is not pending:
+            return  # a newer turn superseded this, or it was cancelled
+        self._pending = None
+        line = await self._generate_grounded(
+            GAP_SYSTEM, pending["query"], "", pending["sources"]
+        )
+        if line:
+            logger.info("gap-fill: room stayed silent, interjecting")
+            self._speak_out_of_turn(pending["query"], pending["sources"], line)
+
+    async def _maybe_correct(self, prev: dict, human_text: str) -> None:
+        """Judge a human's turn against a held topic's sources; correct only if wrong."""
+        line = await self._generate_grounded(
+            CORRECTION_SYSTEM, prev["query"], human_text, prev["sources"]
+        )
+        if line:
+            logger.info("correction: a stated fact contradicted the sources")
+            self._speak_out_of_turn(prev["query"], prev["sources"], line)
+
+    async def _generate_grounded(
+        self, system: str, query: str, statement: str, sources: list
+    ) -> str | None:
+        """Standalone LLM call (off the voice pipeline) → a one-line spoken reply, or
+        None if it returns the PASS sentinel."""
+        src = "\n".join(
+            f"- ({(getattr(d, 'metadata', {}) or {}).get('source', '?')}) "
+            f"{(getattr(d, 'text', '') or '').strip()}"
+            for d in sources
+        )
+        ctx = ChatContext()
+        ctx.add_message(role="system", content=system)
+        ctx.add_message(
+            role="user",
+            content=(
+                f"Topic: {query}\n\n"
+                f"What someone just said: {statement or '(no one answered)'}\n\n"
+                f"Grounded facts:\n{src}"
+            ),
+        )
+        try:
+            resp = await self._aux_llm.chat(chat_ctx=ctx).collect()
+            t = (resp.text or "").strip()
+        except Exception:
+            logger.exception("aux generation failed")
+            return None
+        return None if (not t or t.upper().startswith("PASS")) else t
+
+    def _speak_out_of_turn(self, query: str, sources: list, line: str) -> None:
+        """Speak a pre-generated line now (non-blocking). The display card is published
+        by the conversation_item_added handler (say adds to the chat ctx by default)."""
+        self._wm.pending_query = query
+        self._wm.pending_sources = list(sources)
+        try:
+            self.session.say(line, allow_interruptions=True)
+        except Exception:
+            logger.exception("could not speak out of turn")
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Stream the reply to the display card as it generates, so context shows up
@@ -671,6 +777,12 @@ async def my_agent(ctx: JobContext):
             task = asyncio.create_task(assistant.publish_reply_card(item.text_content))
             bg_tasks.add(task)
             task.add_done_callback(bg_tasks.discard)
+
+    # When a human starts talking, hold any pending gap-fill — yield them the floor.
+    @session.on("user_state_changed")
+    def _on_user_state(ev):
+        if getattr(ev, "new_state", None) == "speaking":
+            assistant.on_user_started_speaking()
 
     # Persist decisions when the meeting ends (room empties). Shutdown hooks must
     # finish within ~10s (tunable via shutdown_process_timeout in server options).
