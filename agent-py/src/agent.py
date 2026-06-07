@@ -58,8 +58,26 @@ WAKE_NAMES = [
 # Ambient cards only surface when a hit scores at/above this. Tune per corpus —
 # too low floods the display, too high never surfaces. Logged on each turn.
 AMBIENT_SCORE_THRESHOLD = float(os.getenv("AMBIENT_SCORE_THRESHOLD", "0.3"))
-# How many recently-surfaced snippets to keep for "explain what's on screen".
+# How many recently-surfaced results to keep for "explain what's on screen".
 RECENT_CONTEXT_MAX = 6
+# Fast model that synthesizes the display card from retrieved context, off the
+# voice path. A small model keeps the card snappy.
+SYNTH_MODEL = os.getenv("SYNTH_MODEL", "openai/gpt-4.1-mini")
+
+# System prompt for the display-card synthesizer. Output is shown on screen, not
+# spoken; it must be grounded in the retrieved text and say NONE if nothing fits.
+SYNTH_SYSTEM = textwrap.dedent(
+    """\
+    You generate a single concise CONTEXT CARD shown on a live meeting display
+    (it is read, not spoken). Given what's being discussed right now and the
+    retrieved prior context, write at most two sentences capturing the most
+    relevant prior fact, decision, or discussion — strictly grounded in the
+    retrieved text. Mention the source in passing (e.g. "Slack, May" or "the May
+    review decision"). Do not invent anything. If none of the retrieved context is
+    genuinely relevant to what's being discussed, output exactly: NONE
+    Plain text only — no markdown, labels, or preamble.
+    """
+)
 
 
 def _now_iso() -> str:
@@ -227,6 +245,8 @@ class Assistant(Agent):
         self._moss = MossClient(
             os.getenv("MOSS_PROJECT_ID"), os.getenv("MOSS_PROJECT_KEY")
         )
+        # Standalone LLM for synthesizing display cards (off the voice pipeline).
+        self._synth_llm = inference.LLM(model=SYNTH_MODEL)
         self._wm = WorkingMemory(conversation_id=conversation_id, group_id=group_id)
         self._indexes_loaded = False
 
@@ -273,13 +293,14 @@ class Assistant(Agent):
     # ---- retrieval & surfacing ------------------------------------------------
 
     async def _ambient_surface(self, text: str) -> None:
-        """Quietly surface a card if this turn strongly matches stored context.
-        Score-gated and deduped so the display doesn't flash on every sentence."""
+        """Quietly surface ONE synthesized card if this turn strongly matches stored
+        context. Score-gated (a cheap pre-filter), then an LLM synthesizes a grounded
+        result from the retrieved docs — we display THAT, not the raw chunks."""
         if not text.strip():
             return
         try:
             result = await self._moss.query_multi_index(
-                ALL_INDEXES, text, self._query_options(top_k=3)
+                ALL_INDEXES, text, self._query_options(top_k=5)
             )
         except Exception:
             logger.exception("ambient query failed")
@@ -292,15 +313,26 @@ class Assistant(Agent):
             if (getattr(d, "score", None) or 0.0) >= AMBIENT_SCORE_THRESHOLD
         ]
         logger.info(
-            "ambient turn: top_score=%.3f threshold=%.3f surfacing=%d",
+            "ambient turn: top_score=%.3f threshold=%.3f relevant=%d",
             top,
             AMBIENT_SCORE_THRESHOLD,
             len(relevant),
         )
-        if relevant:
-            await self._surface(
-                text, relevant, getattr(result, "time_taken_ms", None), dedup=True
-            )
+        if not relevant:
+            return
+        # Don't re-surface context already shown this meeting.
+        if all(getattr(d, "id", None) in self._wm.surfaced_card_ids for d in relevant):
+            return
+        # Synthesize the card from the retrieved context — this is the LLM result we
+        # display, in place of the raw retrieved chunks.
+        answer = await self._synthesize(text, relevant)
+        if not answer or answer.strip().upper() == "NONE":
+            logger.info("ambient turn: synthesis declined (NONE/empty)")
+            return
+        self._mark_surfaced(relevant, answer)
+        await self._publish_context(
+            text, relevant, getattr(result, "time_taken_ms", None), answer=answer
+        )
 
     def _query_options(self, top_k: int) -> QueryOptions:
         return QueryOptions(
@@ -308,34 +340,41 @@ class Assistant(Agent):
             filter={"field": "group_id", "condition": {"$eq": self._group_id}},
         )
 
-    async def _surface(
-        self, query: str, docs: list, time_taken_ms, *, dedup: bool
-    ) -> list:
-        """Record + publish a set of result docs as a card. With dedup=True, drop
-        docs already surfaced this meeting (ambient); with dedup=False, surface all
-        (an explicit search_context call the user asked for)."""
-        if dedup:
-            fresh = [
-                d
-                for d in docs
-                if getattr(d, "id", None) not in self._wm.surfaced_card_ids
-            ]
-        else:
-            fresh = list(docs)
-        if not fresh:
-            return []
-        for d in fresh:
+    async def _synthesize(self, utterance: str, docs: list) -> str:
+        """Standalone LLM call (off the voice pipeline) → a concise, grounded card.
+        Returns "" or "NONE" when nothing relevant should be shown."""
+        sources = "\n".join(
+            f"- ({(getattr(d, 'metadata', {}) or {}).get('source', '?')}) "
+            f"{(getattr(d, 'text', '') or '').strip()}"
+            for d in docs
+        )
+        ctx = ChatContext()
+        ctx.add_message(role="system", content=SYNTH_SYSTEM)
+        ctx.add_message(
+            role="user",
+            content=(
+                f'Being discussed now: "{utterance}"\n\n'
+                f"Retrieved prior context:\n{sources}\n\nWrite the card."
+            ),
+        )
+        try:
+            resp = await self._synth_llm.chat(chat_ctx=ctx).collect()
+            return (resp.text or "").strip()
+        except Exception:
+            logger.exception("card synthesis failed")
+            return ""
+
+    def _mark_surfaced(self, docs: list, recent_snippet: str | None) -> None:
+        """Record surfaced doc ids (for dedup) and the snippet shown (so an addressed
+        turn can explain what's on screen)."""
+        for d in docs:
             doc_id = getattr(d, "id", None)
             if doc_id:
                 self._wm.surfaced_card_ids.add(doc_id)
-            snippet = (getattr(d, "text", "") or "").strip()
-            if snippet:
-                self._wm.recent_context.append(snippet)
-        # cap recent context
-        if len(self._wm.recent_context) > RECENT_CONTEXT_MAX:
-            self._wm.recent_context = self._wm.recent_context[-RECENT_CONTEXT_MAX:]
-        await self._publish_context(query, fresh, time_taken_ms)
-        return fresh
+        if recent_snippet:
+            self._wm.recent_context.append(recent_snippet)
+            if len(self._wm.recent_context) > RECENT_CONTEXT_MAX:
+                self._wm.recent_context = self._wm.recent_context[-RECENT_CONTEXT_MAX:]
 
     # ---- working memory -------------------------------------------------------
 
@@ -358,12 +397,16 @@ class Assistant(Agent):
         except Exception:
             logger.exception("Failed to publish %s data", type_)
 
-    async def _publish_context(self, query: str, docs: list, time_taken_ms) -> None:
+    async def _publish_context(
+        self, query: str, docs: list, time_taken_ms, answer: str | None = None
+    ) -> None:
         """Publish a `moss_context` message for the frontend context panel.
 
         Payload shape is contractual — the frontend parser
-        (frontend hooks/useMossContextEvents.ts) depends on these exact keys.
-        `timestamp` is epoch SECONDS (the frontend multiplies by 1000).
+        (frontend hooks/useMossContextEvents.ts) depends on these keys. `answer` is
+        the synthesized result shown as the card headline (ambient turns); `matches`
+        are the supporting sources for citation. `timestamp` is epoch SECONDS (the
+        frontend multiplies by 1000).
         """
         matches: list[dict] = []
         for doc in docs:
@@ -376,15 +419,15 @@ class Assistant(Agent):
             if metadata:
                 entry["metadata"] = metadata
             matches.append(entry)
-        await self._publish(
-            "moss_context",
-            {
-                "query": query,
-                "matches": matches,
-                "time_taken_ms": time_taken_ms,
-                "timestamp": _now_epoch(),
-            },
-        )
+        data: dict = {
+            "query": query,
+            "matches": matches,
+            "time_taken_ms": time_taken_ms,
+            "timestamp": _now_epoch(),
+        }
+        if answer is not None:
+            data["answer"] = answer
+        await self._publish("moss_context", data)
 
     # ---- tools (only reachable when addressed) --------------------------------
 
@@ -408,14 +451,14 @@ class Assistant(Agent):
             return "I couldn't search the context store just now."
 
         docs = getattr(result, "docs", None) or []
-        # Explicit ask → surface all (no dedup); the user wants these results now.
-        fresh = await self._surface(
-            query, docs, getattr(result, "time_taken_ms", None), dedup=False
-        )
-        snippets = [(getattr(d, "text", "") or "").strip() for d in fresh]
+        snippets = [(getattr(d, "text", "") or "").strip() for d in docs]
         snippets = [s for s in snippets if s]
         if not snippets:
             return "No relevant context found."
+        # In addressed mode the agent SPEAKS the synthesis, so the card shows the
+        # sources (citations) for what it's about to say — no separate synthesis.
+        self._mark_surfaced(docs, " / ".join(snippets[:2]))
+        await self._publish_context(query, docs, getattr(result, "time_taken_ms", None))
         return "\n\n".join(snippets)
 
     @function_tool()

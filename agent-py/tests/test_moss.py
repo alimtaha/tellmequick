@@ -131,21 +131,51 @@ def test_is_addressed_false_for_normal_talk() -> None:
 # ---- on_user_turn_completed: the display-first gate ----------------------------
 
 
-async def test_ambient_turn_surfaces_card_and_stops(stub_moss) -> None:
-    """A non-addressed turn with a strong match surfaces a card and aborts the reply."""
+async def test_ambient_turn_surfaces_synthesized_card_and_stops(stub_moss) -> None:
+    """A non-addressed strong match surfaces a SYNTHESIZED card (the LLM result, not
+    the raw chunks) and aborts the spoken reply."""
     room = _FakeRoom()
     assistant = Assistant(room=room, group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
         [_FakeDoc("Hold events flat.", doc_id="meet:1", score=THRESHOLD + 0.5)]
     )
 
-    msg = _FakeMessage("what about the events budget")
-    with pytest.raises(StopResponse):
-        await assistant.on_user_turn_completed(_FakeTurnCtx(), msg)
+    async def _fake_synth(utterance, docs):
+        return "The team decided to hold the events budget flat (May review)."
 
-    # Card published, no spoken reply (StopResponse), no Moss writes.
-    assert "moss_context" in _published_types(room)
+    assistant._synthesize = _fake_synth
+
+    with pytest.raises(StopResponse):
+        await assistant.on_user_turn_completed(
+            _FakeTurnCtx(), _FakeMessage("what about the events budget")
+        )
+
+    payload = _decoded(room.local_participant.published)
+    assert payload["type"] == "moss_context"
+    # The headline is the synthesized result; raw docs ride along as citations.
+    assert payload["data"]["answer"].startswith("The team decided")
+    assert payload["data"]["matches"][0]["text"] == "Hold events flat."
     assert assistant._moss.add_docs_calls == []
+
+
+async def test_ambient_synthesis_none_suppresses_card(stub_moss) -> None:
+    """Even on a high-score match, if synthesis judges nothing relevant (NONE),
+    no card is shown — a second precision gate beyond the score threshold."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+    assistant._moss.query_result = _FakeSearchResult(
+        [_FakeDoc("tangential", doc_id="x", score=THRESHOLD + 0.5)]
+    )
+
+    async def _none(utterance, docs):
+        return "NONE"
+
+    assistant._synthesize = _none
+
+    with pytest.raises(StopResponse):
+        await assistant.on_user_turn_completed(_FakeTurnCtx(), _FakeMessage("hmm"))
+
+    assert room.local_participant.published == []
 
 
 async def test_ambient_turn_below_threshold_no_card(stub_moss) -> None:

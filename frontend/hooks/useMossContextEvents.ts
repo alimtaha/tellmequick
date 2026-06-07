@@ -13,6 +13,9 @@ type MossMatch = {
 export type MossContextEvent = {
   id: string;
   query: string;
+  /** Synthesized, grounded result shown as the card headline (ambient turns). */
+  answer?: string;
+  /** Supporting sources for citation. */
   matches: MossMatch[];
   /** Timestamp in milliseconds since epoch */
   timestamp: number;
@@ -34,6 +37,8 @@ function parsePayload(payload: Uint8Array): MossContextEvent | null {
     if (!query) {
       return null;
     }
+
+    const answer = typeof data.answer === 'string' && data.answer ? data.answer : undefined;
 
     const matchesInput = Array.isArray(data.matches) ? data.matches : [];
     const matches: MossMatch[] = matchesInput
@@ -59,6 +64,7 @@ function parsePayload(payload: Uint8Array): MossContextEvent | null {
     return {
       id: `${timestampMs}-${query}`,
       query,
+      answer,
       matches,
       timestamp: timestampMs,
       timeTakenMs,
