@@ -56,7 +56,7 @@ flowchart TD
     ME[Metrics snapshot]
   end
   SRC --> ING["Ingestion & normalization<br/>connector → common doc schema → chunk → metadata<br/>(Unsiloed for messy PDFs)"]
-  ING --> MOSS[("Moss — unified memory<br/>built-in embedding · hybrid · metadata-scoped · &lt;10ms")]
+  ING --> MOSS[("Moss — 3 indexes<br/>knowledge · slack · meetings<br/>read-only in-meeting · post-meeting write")]
   AGENT["LiveKit Agents (the agent runtime)<br/>WebRTC session · STT · turn detection · tool calls · UI publish"]
   LLM["LLM calls (routed via TrueFoundry)<br/>gate → query+scope → render"]
   LIVE["Live utterance / question"] --> AGENT
@@ -97,8 +97,8 @@ Retrieval is then uniform: `Moss.query(index, query_text, filter={group_id, sour
 |---|---|
 | **Connectors** | One adapter per source → normalized docs. Pluggable; adding a source = adding a connector. |
 | **Ingestion** | Chunk per source type, attach metadata, write to Moss. Unsiloed for messy PDFs. Seed-time in v0. |
-| **Moss** | Unified memory + retrieval. **Built-in embedding (`moss-minilm`)** embeds both ingest and query — no embedding service, no embedding-space mismatch. **Hybrid** (semantic + keyword) via `alpha`. **Metadata filtering** (`$eq/$and/$in`) for source/group/user scoping. In-process — no network hop on the hot path; indexes sync to Moss Cloud. |
-| **LiveKit Agents** | **The agent runtime.** A LiveKit Agents worker joins the meeting room over WebRTC as a programmatic participant, runs streaming STT + turn detection on the live audio, owns the per-utterance loop (gate → Moss query → card), calls memory query / write-back as tools, and publishes cards back to the room's frontend over LiveKit data channels. This is where "the agent" lives — TrueFoundry is just the LLM gateway it calls into. |
+| **Moss** | Memory + retrieval across **three indexes** — `knowledge` (filings/docs), `slack` (messages), `meetings` (distilled notes + decisions). **Built-in embedding (`moss-minilm`)** for both ingest and query — no embedding service, no embedding-space mismatch. **Hybrid** (semantic + keyword) via `alpha`. **Read-only during a live meeting:** the agent retrieves across all three in one `query_multi_index` call, `group_id`-scoped; nothing is written to Moss on the hot path. The `meetings` index is written once, post-meeting, by a distillation pass. Managed SaaS via `MossClient`. |
+| **LiveKit Agents** | **The agent runtime.** A LiveKit Agents worker joins the meeting room over WebRTC as a programmatic participant, runs streaming STT + turn detection on the live audio, owns the per-utterance loop (gate → Moss query → card), calls read-only memory queries as tools (no mid-meeting writes; persistence is a post-meeting pass), and publishes cards back to the room's frontend over LiveKit data channels. This is where "the agent" lives — TrueFoundry is just the LLM gateway it calls into. |
 | **LLM calls (via TrueFoundry)** | **One fast call** per candidate utterance → `{retrievable, query, scope}`. A second call *only* to compress messy unstructured chunks into a card; structured records skip it. Route the hot-path call to a fast model (MiniMax HighSpeed or equiv.), US/global endpoint. TrueFoundry gives routing, cost governance, and the judge-facing latency panel. |
 | **Live cards surface** | Frontend in the LiveKit room subscribes to the agent's data channel and renders the surfaced answer with source attribution + permalink. |
 | **MiniMax** | LLM option via the gateway. Optional TTS (P2) — would plug in as a LiveKit Agents TTS provider. **Not** used for embeddings. |
@@ -113,7 +113,10 @@ LiveKit Agents STT turn → 1 fast LLM call {retrievable?, query, scope}   // vi
    → structured record → template card (NO LLM)
      OR messy chunk → optional 2nd LLM call to compress
    → agent publishes card to LiveKit data channel → on screen (<1s)
-async, off hot path: new transcript turns + logged decisions → Moss.add_docs(...)
+
+NO Moss writes during the meeting — turns + flagged decisions held in in-process working memory only.
+post-meeting: distill working memory → meetings index (notes + decisions; raw transcripts NOT stored;
+              within-meeting conflicts resolved → latest decision wins).
 ```
 
 ---
@@ -131,11 +134,11 @@ A finance leadership meeting reviewing whether to cut a budget line. Seeded cont
 ### Must-Have (P0)
 
 - **LiveKit Agents worker** running as a programmatic participant in the meeting room, driving live STT (single-stream, < ~2s caption lag, no speaker labels at P0), the per-utterance loop, and card publishing back to the room.
-- **Multi-source seed:** Slack export + transcripts + a metrics snapshot + 1–2 docs, all normalized into one Moss index with metadata.
+- **Multi-source seed:** filings/docs → `knowledge`, Slack export → `slack`, seed prior-meeting notes/decisions → `meetings`. Async ingest, pre-demo.
 - **Retrievable-question gate** — one fast structured LLM call returning `{retrievable, query, scope}`; conservative, tuned on the 15-question eval set.
-- **Cross-source retrieval** — one `query` with a `group_id` filter hits Slack + transcripts + docs together; single-digit-ms on the seeded corpus.
+- **Cross-source retrieval** — one `query_multi_index` call hits `knowledge` + `slack` + `meetings` together, `group_id`-scoped; read-only during the meeting; single-digit-ms on the seeded corpus.
 - **Answer card** — structured records render via template (answer + source + permalink: "from Slack, [date]" / "Decided in [meeting]"); LLM synthesis only for unstructured chunks; end-to-end < 1s on the happy path.
-- **Memory write-back** (async) — transcript turns + a manually-flagged decision written to Moss, retrievable later.
+- **Post-meeting memory** — at meeting end, a distillation pass writes important notes + decisions to the `meetings` index (raw transcripts not stored; within-meeting conflicts resolved to the latest decision). No writes to Moss during the meeting. Retrievable in the next meeting.
 - **Retrieval-latency comparison** — Moss vs. a **networked** vector DB on the same query.
 
 ### Nice-to-Have (P1)
@@ -186,7 +189,7 @@ Contract between layers is the normalized doc schema above. Connectors only need
 - **[Eng] Embedding — RESOLVED.** Moss built-in `moss-minilm`, same model ingest + query. Confirm recall on the eval set in hour 0; `moss-mediumlm` is the fallback.
 - **[Eng] Slack seed format.** Use a Slack export JSON → `slack.py` connector. Confirm thread structure maps cleanly to `group_id`.
 - **[Eng] Hot-path latency.** One fast structured call (MiniMax HighSpeed via TrueFoundry, US endpoint); synthesis off the critical path for structured records.
-- **[Eng] Write-back timing.** Async per-turn, fire-and-forget.
+- **[Eng] Memory write timing.** No writes during the meeting. One post-meeting distillation pass writes notes + decisions to the `meetings` index, resolving within-meeting conflicts. **[Eng] Cross-meeting reconciliation** (a later meeting contradicting an earlier one) is a known TODO — deferred; recency/score is the interim.
 - **[Product] Source disagreement** (Slack says X, filing says Y) — surface both with sources, let the room judge.
 - **[Data] Metrics snapshot** — internal seed table, or pull a public co's figures from EDGAR's XBRL `companyfacts` API if we want that story. Text rows only (no charts in v0).
 
@@ -204,8 +207,8 @@ Contract between layers is the normalized doc schema above. Connectors only need
 
 ## 24-hour phasing
 
-- **0–4 — Spine.** Confirm Moss index/query/filter API. Stand up a LiveKit Agents worker that joins a room, runs STT, and ships transcripts to screen. Normalized schema + `/memory` wrapper. Seed Slack + transcripts + docs into one index with metadata. Hardcoded query→templated card path, no LLM.
-- **4–10 — Intelligence.** Single gate/query/scope LLM call via TrueFoundry. Cross-source retrieval by filter. Async write-back.
+- **0–4 — Spine.** Confirm Moss index/query/filter API. Stand up a LiveKit Agents worker that joins a room, runs STT, and ships captions to screen. Normalized schema + `/memory` wrapper. Seed the three indexes — `knowledge` (filings/docs), `slack`, `meetings` (prior notes/decisions). Hardcoded query→templated card path, no LLM.
+- **4–10 — Intelligence.** Single gate/query/scope LLM call. Cross-index retrieval via `query_multi_index` (read-only). Post-meeting distillation → `meetings` write.
 - **10–16 — Hero + numbers.** Seed the Slack thread + prior decision so the hero lands. Networked-baseline latency comparison + 15-question eval.
 - **16–20 — Polish + cut.** Tune the gate against false positives. Card UX, attribution, permalinks, empty state.
 - **20–24 — Rehearse.** Lock the script around the hero. Freeze; only fix breakages. Practice the 90s pitch.
