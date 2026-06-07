@@ -61,9 +61,12 @@ WAKE_NAMES = [
 AMBIENT_SCORE_THRESHOLD = float(os.getenv("AMBIENT_SCORE_THRESHOLD", "0.3"))
 # How many recently-surfaced results to keep for "explain what's on screen".
 RECENT_CONTEXT_MAX = 6
-# Fast model that synthesizes the display card from retrieved context, off the
-# voice path. A small model keeps the card snappy.
-SYNTH_MODEL = os.getenv("SYNTH_MODEL", "openai/gpt-4.1-mini")
+# The voice agent's model — used for spoken replies AND, by default, for writing
+# ambient display cards, so it's the same brain everywhere.
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-5.2-chat-latest")
+# Model that writes the ambient (silent) display card. Same as the voice agent by
+# default; override only if you deliberately want a cheaper/faster model for cards.
+SYNTH_MODEL = os.getenv("SYNTH_MODEL", LLM_MODEL)
 
 # System prompt for the display-card synthesizer. Output is shown on screen, not
 # spoken; it must be grounded in the retrieved text and say NONE if nothing fits.
@@ -209,7 +212,7 @@ class Assistant(Agent):
         super().__init__(
             # LLM runs on LiveKit Inference (no provider key). STT/TTS are on the
             # AgentSession. The LLM only runs when the agent is addressed by name.
-            llm=inference.LLM(model="openai/gpt-5.2-chat-latest"),
+            llm=inference.LLM(model=LLM_MODEL),
             instructions=textwrap.dedent(
                 """\
                 You are tellmequick, a real-time context copilot in a live meeting.
