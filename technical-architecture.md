@@ -1,6 +1,8 @@
-# Technical Architecture & Design — Financial Decision Co-Pilot (v0)
+# Technical Architecture & Design — tellmequick: Decision & Context Co-Pilot (v0)
 
 **Companion to:** [financial-prd-final.md](./financial-prd-final.md). The PRD covers *what* we ship and *why*; this doc covers *how* — interfaces, sequence, latency budget, failure modes, deploy topology. Assumes the PRD is read.
+
+**Product framing:** tellmequick is a real-time decision and context copilot — domain-agnostic. The v0 demo is a financial leadership meeting (PRD §Demo scenario), but the product and architecture are general; nothing below assumes finance.
 
 **Grounded in the scaffold.** This repo is based on `livekit-examples/moss-hacker-starter` (see [agent-py/AGENTS.md](./agent-py/AGENTS.md)). The design below extends the scaffold rather than replacing it — same `MossClient`, same `@function_tool` pattern, same `AgentServer` + `@server.rtc_session` wiring. Where we diverge, we say so.
 

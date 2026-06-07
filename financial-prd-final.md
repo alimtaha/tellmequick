@@ -1,6 +1,6 @@
-# PRD — Financial Decision Co-Pilot
+# PRD — tellmequick: Decision & Context Co-Pilot
 
-*(working title — the meeting copilot is the core surface, not the whole product)*
+*Real-time context surfacing for any meeting, call, or situation where the supporting facts already exist but aren't in the room. Domain-agnostic; v0 demo is a financial leadership meeting.*
 
 **Status:** v0, hackathon scope (24h) · **Event:** Conversational AI Hackathon (YC / Moss), June 6–7 2026
 
@@ -8,11 +8,11 @@
 
 ## One-liner
 
-A company's financial context — Slack threads, meeting transcripts, filings, metrics — is scattered across tools and human memory. This copilot unifies all of it into one fast, queryable memory and surfaces the relevant prior context *live in the room* when a financial decision is being made. So "we talked about this somewhere" and "let me get back to you" stop being how high-stakes calls get made.
+A team's context — Slack threads, meeting transcripts, documents, metrics, prior decisions — is scattered across tools and human memory. **tellmequick** unifies all of it into one fast, queryable memory and surfaces the relevant prior context *live in the room* when it's needed. So "we talked about this somewhere" and "let me get back to you" stop being how high-stakes calls get made.
 
 ## Why now / the wedge
 
-High-stakes financial decisions — layoffs, budget cuts, earnings prep, big spend — get made in meetings where the supporting context isn't present. It was decided in a Slack thread three weeks ago, buried in last quarter's transcript, or sitting in a filing nobody reread. The fact isn't in the room, so the decision slips or gets made on vibes.
+High-stakes meetings — finance reviews, exec syncs, customer escalations, hiring debates, strategy calls — happen without the context that should inform them. It was decided in a Slack thread three weeks ago, buried in last quarter's transcript, sitting in a doc nobody reread. The fact isn't in the room, so the decision slips or gets made on vibes.
 
 Existing tools each own one slice and none close the loop live: meeting assistants (Granola, Gong) work *after* the call; enterprise search (Glean) is a separate tab you context-switch into. The wedge is unifying spoken/written history **and** documents into one memory, and retrieving from it fast enough to land *before the next sentence*.
 
@@ -24,21 +24,21 @@ The architecture below describes the **full vision**. The 24-hour build ships a 
 
 | | North-star (the vision / what we scaffold toward) | **v0 — what actually ships in 24h** |
 |---|---|---|
-| Sources | Slack, Zoom, live meeting audio, EDGAR filings, internal metrics, CRM | Live transcript (LiveKit Agents) + **Slack seeded** + a metrics snapshot + a couple of seed docs/filings |
+| Sources | Slack, Zoom, live meeting audio, filings/PDFs, internal metrics, CRM | Live transcript (LiveKit Agents) + **Slack seeded** + a metrics snapshot + a couple of seed docs/filings |
 | Ingestion | Live connectors, scheduled sync | **Seed-time ingest only** (scripted, pre-demo) |
 | Surfaces | Live cards (+ dashboards later) | **Live cards only** |
 | Memory | Multi-company, retention, privacy scoping | One company, one group thread |
-| Decisions | "should we lay off / cut budget" framing | **surface evidence, cited — humans decide** |
+| Decisions | Eventually opining on decisions ("should we lay off?", "should we honor this discount?") | **surface evidence, cited — humans decide** |
 
-The v0 demo is the meeting copilot core, pointed at a financial scenario, with Slack as a second source. Everything else is connectors and surfaces the architecture is *designed for* but we don't build on the clock.
+tellmequick is domain-agnostic; the v0 demo is the core surface pointed at a financial leadership scenario, with Slack as a second source. Everything else is connectors and surfaces the architecture is *designed for* but we don't build on the clock.
 
 ---
 
 ## Non-Goals (v0)
 
-- **Voice output.** Display-first; the agent shows, it doesn't talk over the meeting. (MiniMax TTS is a P2 toggle.)
+- **Speaking over the meeting.** The agent has voice (Cartesia TTS) but only chimes in when retrieving something useful; not narrating, not summarizing, not commenting on every utterance. Display surface always runs in parallel.
 - **Visualizations / dashboards.** Deferred — not in v0. Metrics are retrievable as text (e.g. "enterprise churn Q2 = X"), but no charts.
-- **Investment/financial advice or buy/sell/layoff recommendations.** The tool surfaces evidence (prior decisions, what was said where, risks) with citations. Humans make the call. An AI making confident financial calls is neither credible nor defensible.
+- **Decision recommendations.** The tool surfaces evidence (prior decisions, what was said where, risks) with citations. Humans make the call. An AI making confident high-stakes calls is neither credible nor defensible.
 - **Note-taking / summaries.** Crowded post-call market; we write decisions back to memory but don't generate minutes.
 - **Live connectors, auth, multi-tenant.** Seed data only in 24h.
 - **Mobile.**
@@ -52,7 +52,7 @@ flowchart TD
   subgraph SRC["Data sources"]
     SL[Slack]
     TR[Meeting & Zoom transcripts]
-    FI[SEC filings / 10-Ks]
+    FI[Filings / docs / PDFs]
     ME[Metrics snapshot]
   end
   SRC --> ING["Ingestion & normalization<br/>connector → common doc schema → chunk → metadata<br/>(Unsiloed for messy PDFs)"]
@@ -75,7 +75,7 @@ Every source is a **connector** that emits the same shape. This is what makes ne
   "id": "slack:C123:p1699...",        // stable, source-prefixed
   "text": "...",                       // the chunk to embed/search
   "source": "slack | transcript | filing | metric | doc",
-  "group_id": "acme-finance-weekly",   // the thread/topic scope
+  "group_id": "acme-strategy-weekly",  // the thread/topic scope
   "user_id": "priya | null",           // who said/owns it (for attribution)
   "timestamp": "2026-05-01T...",
   "url": "https://slack.com/...",      // permalink for the citation
@@ -86,7 +86,7 @@ Every source is a **connector** that emits the same shape. This is what makes ne
 
 - **Slack** → one doc per message (or per thread), thread-aware, `user_id` from author.
 - **Transcripts** (LiveKit Agents live session + uploaded Zoom) → one doc per turn segment.
-- **Filings / 10-Ks** → Unsiloed parses the PDF → chunked docs, `meta` carries filing type + section.
+- **Documents / filings** → Unsiloed parses the PDF → chunked docs, `meta` carries doc type + section.
 - **Metrics** → a KPI snapshot; a text summary row per metric goes into Moss for retrieval ("enterprise churn Q2 = X"). No time-series / charts in v0.
 
 Retrieval is then uniform: `Moss.query(index, query_text, filter={group_id, source?, user_id?})` hits **all** sources in one round trip, scoped by metadata.
