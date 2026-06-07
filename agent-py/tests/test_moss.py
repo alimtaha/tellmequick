@@ -1,4 +1,4 @@
-"""Unit tests for the agent's interaction gate, Moss-backed tools, and distillation.
+"""Unit tests for the agent's interjection gate, Moss-backed tools, and distillation.
 
 Deterministic unit tests that exercise the methods and pure helpers directly. They
 stub `MossClient` via monkeypatch so they run with no Moss credentials and no
@@ -20,7 +20,7 @@ from agent import (
 )
 
 GROUP_ID = "acme-finance"
-THRESHOLD = agent_module.AMBIENT_SCORE_THRESHOLD
+THRESHOLD = agent_module.INTERJECT_THRESHOLD
 
 
 class _FakeDoc:
@@ -102,16 +102,13 @@ def stub_moss(monkeypatch):
     monkeypatch.setattr(agent_module, "MossClient", _FakeMossClient)
 
 
-def _published_types(room):
-    return [
-        json.loads(p.decode("utf-8"))["type"]
-        for p, _ in room.local_participant.published
-    ]
-
-
 def _decoded(published):
     payload_bytes, _reliable = published[-1]
     return json.loads(payload_bytes.decode("utf-8"))
+
+
+def _joined_injections(turn_ctx):
+    return " ".join(m["content"] for m in turn_ctx.added)
 
 
 # ---- is_addressed (wake-name detection) ---------------------------------------
@@ -128,93 +125,89 @@ def test_is_addressed_false_for_normal_talk() -> None:
     assert not is_addressed("")
 
 
-# ---- on_user_turn_completed: the display-first gate ----------------------------
+# ---- on_user_turn_completed: the interjection gate ----------------------------
 
 
-async def test_ambient_turn_surfaces_synthesized_card_and_stops(stub_moss) -> None:
-    """A non-addressed strong match surfaces a SYNTHESIZED card (the LLM result, not
-    the raw chunks) and aborts the spoken reply."""
-    room = _FakeRoom()
-    assistant = Assistant(room=room, group_id=GROUP_ID)
+async def test_proactive_strong_match_lets_llm_decide(stub_moss) -> None:
+    """A strong, fresh match does NOT abort the reply — it injects the context and
+    lets the pipeline LLM interject (or PASS). Sources are buffered for the card."""
+    assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
-        [_FakeDoc("Hold events flat.", doc_id="meet:1", score=THRESHOLD + 0.5)]
+        [
+            _FakeDoc(
+                "Hold events flat.",
+                doc_id="meet:1",
+                score=THRESHOLD + 0.2,
+                metadata={"source": "meeting"},
+            )
+        ]
     )
 
-    async def _fake_synth(utterance, docs):
-        return "The team decided to hold the events budget flat (May review)."
-
-    assistant._synthesize = _fake_synth
-
-    with pytest.raises(StopResponse):
-        await assistant.on_user_turn_completed(
-            _FakeTurnCtx(), _FakeMessage("what about the events budget")
-        )
-
-    payload = _decoded(room.local_participant.published)
-    assert payload["type"] == "moss_context"
-    # The headline is the synthesized result; raw docs ride along as citations.
-    assert payload["data"]["answer"].startswith("The team decided")
-    assert payload["data"]["matches"][0]["text"] == "Hold events flat."
-    assert assistant._moss.add_docs_calls == []
-
-
-async def test_ambient_synthesis_none_suppresses_card(stub_moss) -> None:
-    """Even on a high-score match, if synthesis judges nothing relevant (NONE),
-    no card is shown — a second precision gate beyond the score threshold."""
-    room = _FakeRoom()
-    assistant = Assistant(room=room, group_id=GROUP_ID)
-    assistant._moss.query_result = _FakeSearchResult(
-        [_FakeDoc("tangential", doc_id="x", score=THRESHOLD + 0.5)]
+    turn_ctx = _FakeTurnCtx()
+    # Must not raise StopResponse — the LLM gets to decide.
+    await assistant.on_user_turn_completed(
+        turn_ctx, _FakeMessage("what about the events budget")
     )
 
-    async def _none(utterance, docs):
-        return "NONE"
-
-    assistant._synthesize = _none
-
-    with pytest.raises(StopResponse):
-        await assistant.on_user_turn_completed(_FakeTurnCtx(), _FakeMessage("hmm"))
-
-    assert room.local_participant.published == []
+    assert assistant._expect_pass is True
+    assert len(assistant._wm.pending_sources) == 1
+    injected = _joined_injections(turn_ctx)
+    assert "Hold events flat." in injected
+    assert "Proactive check" in injected
 
 
-async def test_ambient_turn_below_threshold_no_card(stub_moss) -> None:
-    """A weak match surfaces nothing — display stays quiet."""
-    room = _FakeRoom()
-    assistant = Assistant(room=room, group_id=GROUP_ID)
+async def test_proactive_weak_match_stays_silent(stub_moss) -> None:
+    """Below the interjection threshold → stay quiet, no LLM, nothing buffered."""
+    assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
         [_FakeDoc("loosely related", doc_id="x", score=max(THRESHOLD - 0.2, 0.0))]
     )
 
+    turn_ctx = _FakeTurnCtx()
+    with pytest.raises(StopResponse):
+        await assistant.on_user_turn_completed(turn_ctx, _FakeMessage("small talk"))
+
+    assert turn_ctx.added == []
+    assert assistant._wm.pending_sources == []
+    assert assistant._expect_pass is False
+
+
+async def test_proactive_already_surfaced_stays_silent(stub_moss) -> None:
+    """Don't re-interject on context already surfaced this meeting."""
+    assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
+    assistant._wm.surfaced_card_ids.add("meet:1")
+    assistant._moss.query_result = _FakeSearchResult(
+        [_FakeDoc("Hold events flat.", doc_id="meet:1", score=THRESHOLD + 0.2)]
+    )
+
     with pytest.raises(StopResponse):
         await assistant.on_user_turn_completed(
-            _FakeTurnCtx(), _FakeMessage("small talk")
+            _FakeTurnCtx(), _FakeMessage("events budget again")
         )
 
-    assert room.local_participant.published == []
 
-
-async def test_addressed_turn_speaks_and_injects_screen_context(stub_moss) -> None:
-    """An addressed turn does NOT abort the reply, and injects what's on screen."""
+async def test_addressed_turn_answers_and_injects_screen_context(stub_moss) -> None:
+    """An addressed turn does NOT abort the reply, injects what's on screen, and is
+    not gated on PASS (it always answers)."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._wm.recent_context = ["Hold events flat (decided in May review)."]
 
     turn_ctx = _FakeTurnCtx()
-    # Should NOT raise StopResponse.
     await assistant.on_user_turn_completed(
         turn_ctx, _FakeMessage("tellmequick, can you explain that?")
     )
 
-    assert len(turn_ctx.added) == 1
-    assert "Hold events flat" in turn_ctx.added[0]["content"]
+    assert assistant._expect_pass is False
+    assert assistant._wm.pending_query.lower().startswith("tellmequick")
+    injected = _joined_injections(turn_ctx)
+    assert "Hold events flat" in injected
+    assert "Addressed" in injected
 
 
-# ---- search_context (only reachable when addressed) ---------------------------
+# ---- search_context -----------------------------------------------------------
 
 
 async def test_search_context_queries_and_buffers_sources(stub_moss) -> None:
-    """search_context returns snippets to the LLM and BUFFERS the sources — the card
-    is published later with the spoken reply, not immediately."""
     room = _FakeRoom()
     assistant = Assistant(room=room, group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
@@ -223,7 +216,7 @@ async def test_search_context_queries_and_buffers_sources(stub_moss) -> None:
                 "Events drove 40% of pipeline.",
                 doc_id="slack:1",
                 score=0.91,
-                metadata={"source": "slack", "url": "https://s/1"},
+                metadata={"source": "slack"},
             ),
             _FakeDoc("Hold events flat.", doc_id="meet:1", score=0.84),
         ],
@@ -249,25 +242,6 @@ async def test_search_context_queries_and_buffers_sources(stub_moss) -> None:
     assert room.local_participant.published == []
 
 
-async def test_publish_reply_card_mirrors_spoken_answer_with_sources(stub_moss) -> None:
-    """The voice agent's spoken reply is mirrored to a card with its cited sources."""
-    room = _FakeRoom()
-    assistant = Assistant(room=room, group_id=GROUP_ID)
-    assistant._wm.pending_query = "what did we decide about events?"
-    assistant._wm.pending_sources = [
-        _FakeDoc("Hold events flat.", doc_id="meet:1", metadata={"source": "meeting"})
-    ]
-
-    await assistant.publish_reply_card("We decided to hold the events budget flat.")
-
-    payload = _decoded(room.local_participant.published)
-    assert payload["type"] == "moss_context"
-    assert payload["data"]["answer"] == "We decided to hold the events budget flat."
-    assert payload["data"]["matches"][0]["text"] == "Hold events flat."
-    # Buffer cleared after publishing.
-    assert assistant._wm.pending_sources == []
-
-
 async def test_search_context_is_read_only(stub_moss) -> None:
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult([_FakeDoc("x", doc_id="d1")])
@@ -282,6 +256,38 @@ async def test_search_context_empty_returns_message(stub_moss) -> None:
         await assistant.search_context(None, "nothing here")
         == "No relevant context found."
     )
+
+
+# ---- publish_reply_card -------------------------------------------------------
+
+
+async def test_publish_reply_card_mirrors_spoken_answer_with_sources(stub_moss) -> None:
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+    assistant._wm.pending_query = "what did we decide about events?"
+    assistant._wm.pending_sources = [
+        _FakeDoc("Hold events flat.", doc_id="meet:1", metadata={"source": "meeting"})
+    ]
+
+    await assistant.publish_reply_card("We decided to hold the events budget flat.")
+
+    payload = _decoded(room.local_participant.published)
+    assert payload["type"] == "moss_context"
+    assert payload["data"]["answer"] == "We decided to hold the events budget flat."
+    assert payload["data"]["matches"][0]["text"] == "Hold events flat."
+    assert assistant._wm.pending_sources == []
+
+
+async def test_publish_reply_card_skips_pass(stub_moss) -> None:
+    """A declined interjection (PASS) produces no card and clears the buffer."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+    assistant._wm.pending_sources = [_FakeDoc("x", doc_id="x")]
+
+    await assistant.publish_reply_card("PASS")
+
+    assert room.local_participant.published == []
+    assert assistant._wm.pending_sources == []
 
 
 # ---- mark_decision ------------------------------------------------------------
@@ -364,7 +370,7 @@ async def test_finalize_meeting_writes_resolved_decisions(stub_moss) -> None:
     assert len(assistant._moss.add_docs_calls) == 1
     index, docs, _opts = assistant._moss.add_docs_calls[0]
     assert index == agent_module.MEETINGS_INDEX
-    assert len(docs) == 1  # conflict resolved to one
+    assert len(docs) == 1
     assert docs[0].text == "Cut events 20%."
     assert agent_module.MEETINGS_INDEX in assistant._moss.load_index_calls
 

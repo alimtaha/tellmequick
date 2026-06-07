@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import textwrap
+from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -17,6 +18,7 @@ from livekit.agents import (
     ChatMessage,
     JobContext,
     JobProcess,
+    ModelSettings,
     RunContext,
     StopResponse,
     cli,
@@ -45,43 +47,31 @@ ALL_INDEXES = [KNOWLEDGE_INDEX, SLACK_INDEX, MEETINGS_INDEX]
 # Single-group demo scope. The frontend can override via dispatch metadata.
 DEFAULT_GROUP_ID = os.getenv("DEFAULT_GROUP_ID", "acme-finance")
 
-# --- Interaction model: display-first, voice-on-address ----------------------
-# The agent listens quietly and surfaces context CARDS on the display without
-# speaking (ambient). It only SPEAKS when addressed by name. See README/PRD.
+# The one model — drives spoken replies AND proactive interjections.
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-5.2-chat-latest")
+
+# --- Interaction model: an interjecting "third participant" ------------------
+# The agent listens. After each turn it does ONE retrieval; if a strong, fresh
+# match turns up it lets its LLM decide whether to chime in out loud (or PASS to
+# stay quiet). It also answers when addressed by name. No silent-synthesis path,
+# no second model — one LLM, one retrieval.
 #
-# Wake names that switch the agent from ambient (display-only) to addressed
-# (spoken reply). STT usually renders "tellmequick" as "tell me quick".
+# Wake names for explicit address. STT usually renders "tellmequick" as the
+# phrase "tell me quick".
 WAKE_NAMES = [
     n.strip().lower()
     for n in os.getenv("AGENT_WAKE_NAMES", "tellmequick,tell me quick").split(",")
     if n.strip()
 ]
-# Ambient cards only surface when a hit scores at/above this. Tune per corpus —
-# too low floods the display, too high never surfaces. Logged on each turn.
-AMBIENT_SCORE_THRESHOLD = float(os.getenv("AMBIENT_SCORE_THRESHOLD", "0.3"))
+# The agent only *considers* interjecting when a hit scores at/above this. Speaking
+# interrupts humans, so this bar is higher than a glanceable card would warrant.
+# Tune per corpus; every turn logs the top score. Below the bar = instant silence,
+# no LLM call.
+INTERJECT_THRESHOLD = float(os.getenv("INTERJECT_THRESHOLD", "0.4"))
+# Sentinel the LLM emits to decline interjecting; suppressed before TTS.
+INTERJECT_PASS = "PASS"
 # How many recently-surfaced results to keep for "explain what's on screen".
 RECENT_CONTEXT_MAX = 6
-# The voice agent's model — used for spoken replies AND, by default, for writing
-# ambient display cards, so it's the same brain everywhere.
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-5.2-chat-latest")
-# Model that writes the ambient (silent) display card. Same as the voice agent by
-# default; override only if you deliberately want a cheaper/faster model for cards.
-SYNTH_MODEL = os.getenv("SYNTH_MODEL", LLM_MODEL)
-
-# System prompt for the display-card synthesizer. Output is shown on screen, not
-# spoken; it must be grounded in the retrieved text and say NONE if nothing fits.
-SYNTH_SYSTEM = textwrap.dedent(
-    """\
-    You generate a single concise CONTEXT CARD shown on a live meeting display
-    (it is read, not spoken). Given what's being discussed right now and the
-    retrieved prior context, write at most two sentences capturing the most
-    relevant prior fact, decision, or discussion — strictly grounded in the
-    retrieved text. Mention the source in passing (e.g. "Slack, May" or "the May
-    review decision"). Do not invent anything. If none of the retrieved context is
-    genuinely relevant to what's being discussed, output exactly: NONE
-    Plain text only — no markdown, labels, or preamble.
-    """
-)
 
 
 def _now_iso() -> str:
@@ -125,8 +115,7 @@ class WorkingMemory:
     surfaced_card_ids: set[str] = field(default_factory=set)
     recent_context: list[str] = field(default_factory=list)  # last surfaced snippets
     pending_decisions: list[Decision] = field(default_factory=list)
-    # Per-addressed-turn buffer: sources retrieved this turn + the question asked,
-    # paired with the spoken reply into one display card when the reply commits.
+    # Per-turn buffer: sources + question paired with the spoken line into one card.
     pending_sources: list = field(default_factory=list)
     pending_query: str = ""
 
@@ -193,13 +182,12 @@ def build_meeting_docs(
 
 
 class Assistant(Agent):
-    """tellmequick: a display-first, real-time decision & context copilot.
+    """tellmequick: a real-time context copilot that behaves like a third participant.
 
-    Listens quietly. On each turn it retrieves relevant prior context across three
-    Moss indexes (read-only) and surfaces it as cards on the display WITHOUT
-    speaking — so it never interrupts the meeting. It only speaks when addressed by
-    name, at which point it explains what's on screen and answers. Decisions flagged
-    while addressed are persisted post-meeting (no Moss writes mid-meeting).
+    It listens, and after each turn does one retrieval. On a strong, fresh match it
+    lets its LLM decide whether to chime in out loud with the relevant context (or
+    stay quiet). It also answers when addressed by name. Spoken lines are mirrored to
+    display cards. Decisions are persisted post-meeting (no Moss writes mid-meeting).
     """
 
     def __init__(
@@ -210,41 +198,36 @@ class Assistant(Agent):
         conversation_id: str = "local",
     ) -> None:
         super().__init__(
-            # LLM runs on LiveKit Inference (no provider key). STT/TTS are on the
-            # AgentSession. The LLM only runs when the agent is addressed by name.
             llm=inference.LLM(model=LLM_MODEL),
             instructions=textwrap.dedent(
                 """\
-                You are tellmequick, a real-time context copilot in a live meeting.
-                You are DISPLAY-FIRST: most of the time you stay silent and surface
-                context cards on screen. You only speak when a participant calls you
-                by name — which has just happened now.
+                You are tellmequick, a context copilot sitting in a live meeting like
+                a knowledgeable third participant. You can see the team's documents,
+                Slack history, and decisions from past meetings.
 
-                Because you were addressed, give a brief spoken reply:
+                You produce a reply in exactly two situations, both signalled by an
+                instruction injected as the latest assistant message:
 
-                - If context is already shown on screen (it will be provided to you as
-                  an assistant message), explain those results concisely and answer
-                  what was asked.
-                - For anything not already on screen, call `search_context` to look it
-                  up, then answer grounded in what it returns. Never invent context,
-                  decisions, figures, or sources — if nothing relevant is found, say so.
-                - When the team concludes or agrees on something, call `mark_decision`
-                  with a one-sentence summary, a short `topic` key, and the `owner` if
-                  named. It is captured now and saved after the meeting ends; do not
-                  claim anything is saved to long-term memory during the meeting.
+                1) PROACTIVE CHECK — you're shown relevant prior context that just came
+                   up. If it adds something specific, useful, and non-obvious to what
+                   was just said, chime in with ONE short sentence. If it doesn't (it's
+                   obvious, off-topic, or unhelpful), reply with exactly: PASS
+                   (nothing else). You will then stay silent.
 
-                # Output rules (you are speaking via TTS)
+                2) ADDRESSED — a participant called you by name. Answer their question.
+                   Use search_context to look things up if the answer isn't already
+                   provided to you.
 
-                - Plain text only. No markdown, lists, tables, code, or emojis.
-                - Be brief: one to three sentences. Mention the source in passing
-                  ("from a Slack thread in May", "decided in the May review") — the full
-                  citation is already on screen.
+                When the team concludes or agrees on something, call mark_decision with
+                a one-sentence summary, a short topic key, and the owner if named. It's
+                saved after the meeting; don't claim it's saved during the meeting.
+
+                Output rules (you are spoken aloud via TTS):
+                - Plain text only. No markdown, lists, tables, code, or emoji.
+                - Be brief — one or two sentences. Mention the source in passing
+                  ("from Slack in May", "the May review decision").
                 - Don't read out URLs or internal IDs.
-
-                # Guardrails
-
-                - Stay within safe, lawful, appropriate use; decline harmful requests.
-                - You surface evidence; you do not make the decision for the team.
+                - You surface evidence; you don't make the decision for the team.
                 """
             ),
         )
@@ -253,15 +236,15 @@ class Assistant(Agent):
         self._moss = MossClient(
             os.getenv("MOSS_PROJECT_ID"), os.getenv("MOSS_PROJECT_KEY")
         )
-        # Standalone LLM for synthesizing display cards (off the voice pipeline).
-        self._synth_llm = inference.LLM(model=SYNTH_MODEL)
         self._wm = WorkingMemory(conversation_id=conversation_id, group_id=group_id)
         self._indexes_loaded = False
+        # True on proactive turns: TTS is gated on the PASS sentinel for these.
+        self._expect_pass = False
 
     async def on_enter(self) -> None:
         # Preload all three indexes so the first retrieval is fast. Guarded: log and
         # continue on failure so retrieval can retry the load on use. No spoken
-        # greeting — the agent joins silently (display-first).
+        # greeting — the agent joins silently and only speaks when it has something.
         if not self._indexes_loaded:
             try:
                 await self._moss.load_indexes(ALL_INDEXES)
@@ -275,107 +258,110 @@ class Assistant(Agent):
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
     ) -> None:
-        """Runs after every user turn, before any reply. This is the display-first
-        switch: ambient turns surface a card and abort the spoken reply; addressed
-        turns inject what's on screen and let the LLM speak."""
+        """Runs after every user turn, before any reply. Decides whether the agent
+        speaks: addressed → answer; strong fresh match → let the LLM interject (or
+        PASS); otherwise → stay silent (no LLM call)."""
         text = new_message.text_content or ""
         self.record_turn("user", text)
+        self._expect_pass = False
 
         if is_addressed(text):
-            # Addressed by name → speak. Reset the per-turn source buffer and record
-            # the question; search_context fills the buffer, and the spoken reply is
-            # mirrored to a card (publish_reply_card) when it commits.
+            # Explicit address → answer. Reset the per-turn buffer, record the
+            # question, and hand the LLM whatever is already on screen.
             self._wm.pending_sources = []
             self._wm.pending_query = text
-            # Give the LLM whatever is already on screen so it can "explain the
-            # results it displayed", then let the reply run.
             if self._wm.recent_context:
                 turn_ctx.add_message(
                     role="assistant",
                     content=(
-                        "Context already shown on screen (most recent first):\n- "
+                        "Context already on screen (most recent first):\n- "
                         + "\n- ".join(reversed(self._wm.recent_context))
                     ),
                 )
-            return  # do not StopResponse → the LLM generates a spoken reply
+            turn_ctx.add_message(
+                role="assistant",
+                content=(
+                    "[Addressed] A participant called you by name. Answer concisely; "
+                    "use search_context for anything not already shown."
+                ),
+            )
+            return  # let the pipeline answer + speak
 
-        # Ambient → surface a card if something is relevant, but stay silent.
-        await self._ambient_surface(text)
-        raise StopResponse()
-
-    # ---- retrieval & surfacing ------------------------------------------------
-
-    async def _ambient_surface(self, text: str) -> None:
-        """Quietly surface ONE synthesized card if this turn strongly matches stored
-        context. Score-gated (a cheap pre-filter), then an LLM synthesizes a grounded
-        result from the retrieved docs — we display THAT, not the raw chunks."""
-        if not text.strip():
-            return
+        # Proactive path: one cheap retrieval gates whether we even consider speaking.
         try:
             result = await self._moss.query_multi_index(
                 ALL_INDEXES, text, self._query_options(top_k=5)
             )
         except Exception:
-            logger.exception("ambient query failed")
-            return
+            logger.exception("proactive query failed")
+            raise StopResponse() from None
         docs = getattr(result, "docs", None) or []
         top = max((getattr(d, "score", None) or 0.0 for d in docs), default=0.0)
         relevant = [
-            d
-            for d in docs
-            if (getattr(d, "score", None) or 0.0) >= AMBIENT_SCORE_THRESHOLD
+            d for d in docs if (getattr(d, "score", None) or 0.0) >= INTERJECT_THRESHOLD
         ]
         logger.info(
-            "ambient turn: top_score=%.3f threshold=%.3f relevant=%d",
+            "proactive turn: top_score=%.3f threshold=%.3f relevant=%d",
             top,
-            AMBIENT_SCORE_THRESHOLD,
+            INTERJECT_THRESHOLD,
             len(relevant),
         )
         if not relevant:
-            return
-        # Don't re-surface context already shown this meeting.
+            raise StopResponse()  # nothing strong → stay quiet, no LLM call
         if all(getattr(d, "id", None) in self._wm.surfaced_card_ids for d in relevant):
-            return
-        # Synthesize the card from the retrieved context — this is the LLM result we
-        # display, in place of the raw retrieved chunks.
-        answer = await self._synthesize(text, relevant)
-        if not answer or answer.strip().upper() == "NONE":
-            logger.info("ambient turn: synthesis declined (NONE/empty)")
-            return
-        self._mark_surfaced(relevant, answer)
-        await self._publish_context(
-            text, relevant, getattr(result, "time_taken_ms", None), answer=answer
+            raise StopResponse()  # already surfaced this context — don't repeat
+
+        # Strong, fresh match → let the LLM decide to interject or PASS.
+        self._wm.pending_sources = list(relevant)
+        self._wm.pending_query = text
+        self._expect_pass = True
+        sources = "\n".join(
+            f"- ({(getattr(d, 'metadata', {}) or {}).get('source', '?')}) "
+            f"{(getattr(d, 'text', '') or '').strip()}"
+            for d in relevant
         )
+        turn_ctx.add_message(
+            role="assistant",
+            content=(
+                f"[Proactive check] Relevant prior context just surfaced:\n{sources}\n\n"
+                "If this adds something specific, useful, and non-obvious to what was "
+                "just said, interject in one short sentence. Otherwise reply with "
+                "exactly PASS."
+            ),
+        )
+        return  # let the pipeline run; tts_node suppresses a PASS
+
+    # ---- TTS gating (suppress declined interjections) -------------------------
+
+    async def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
+        """On proactive turns, buffer the reply and stay silent if the LLM declined
+        with PASS. On addressed turns, stream normally (no added latency)."""
+        if not self._expect_pass:
+            async for frame in Agent.default.tts_node(self, text, model_settings):
+                yield frame
+            return
+
+        buffered = ""
+        async for chunk in text:
+            buffered += chunk
+        stripped = buffered.strip()
+        if not stripped or stripped.upper().startswith(INTERJECT_PASS):
+            logger.info("proactive turn: LLM declined (PASS) — staying silent")
+            return  # declined → no audio
+
+        async def _single() -> AsyncIterable[str]:
+            yield buffered
+
+        async for frame in Agent.default.tts_node(self, _single(), model_settings):
+            yield frame
+
+    # ---- retrieval helpers ----------------------------------------------------
 
     def _query_options(self, top_k: int) -> QueryOptions:
         return QueryOptions(
             top_k=top_k,
             filter={"field": "group_id", "condition": {"$eq": self._group_id}},
         )
-
-    async def _synthesize(self, utterance: str, docs: list) -> str:
-        """Standalone LLM call (off the voice pipeline) → a concise, grounded card.
-        Returns "" or "NONE" when nothing relevant should be shown."""
-        sources = "\n".join(
-            f"- ({(getattr(d, 'metadata', {}) or {}).get('source', '?')}) "
-            f"{(getattr(d, 'text', '') or '').strip()}"
-            for d in docs
-        )
-        ctx = ChatContext()
-        ctx.add_message(role="system", content=SYNTH_SYSTEM)
-        ctx.add_message(
-            role="user",
-            content=(
-                f'Being discussed now: "{utterance}"\n\n'
-                f"Retrieved prior context:\n{sources}\n\nWrite the card."
-            ),
-        )
-        try:
-            resp = await self._synth_llm.chat(chat_ctx=ctx).collect()
-            return (resp.text or "").strip()
-        except Exception:
-            logger.exception("card synthesis failed")
-            return ""
 
     def _mark_surfaced(self, docs: list, recent_snippet: str | None) -> None:
         """Record surfaced doc ids (for dedup) and the snippet shown (so an addressed
@@ -390,17 +376,17 @@ class Assistant(Agent):
                 self._wm.recent_context = self._wm.recent_context[-RECENT_CONTEXT_MAX:]
 
     async def publish_reply_card(self, answer: str) -> None:
-        """Mirror the voice agent's spoken reply (the synthesized result) to a display
-        card, paired with the sources it cited this turn. Called when an addressed
-        reply commits. One card, no extra LLM call — the spoken text IS the synthesis."""
+        """Mirror a spoken line (interjection or addressed answer) to a display card,
+        paired with the sources for that turn. Skips the PASS sentinel. Clears the
+        per-turn buffer."""
         answer = (answer or "").strip()
-        if not answer:
-            return
         sources = self._wm.pending_sources
         self._wm.pending_sources = []
+        if not answer or answer.upper().startswith(INTERJECT_PASS):
+            return  # declined → no card
         self._mark_surfaced(sources, answer)
         await self._publish_context(
-            self._wm.pending_query or "(spoken reply)", sources, None, answer=answer
+            self._wm.pending_query or "(interjection)", sources, None, answer=answer
         )
 
     # ---- working memory -------------------------------------------------------
@@ -431,9 +417,8 @@ class Assistant(Agent):
 
         Payload shape is contractual — the frontend parser
         (frontend hooks/useMossContextEvents.ts) depends on these keys. `answer` is
-        the synthesized result shown as the card headline (ambient turns); `matches`
-        are the supporting sources for citation. `timestamp` is epoch SECONDS (the
-        frontend multiplies by 1000).
+        the spoken line shown as the card headline; `matches` are the supporting
+        sources for citation. `timestamp` is epoch SECONDS (frontend multiplies x1000).
         """
         matches: list[dict] = []
         for doc in docs:
@@ -456,15 +441,15 @@ class Assistant(Agent):
             data["answer"] = answer
         await self._publish("moss_context", data)
 
-    # ---- tools (only reachable when addressed) --------------------------------
+    # ---- tools ----------------------------------------------------------------
 
     @function_tool()
     async def search_context(self, context: RunContext, query: str) -> str:
         """Search the team's shared context for information relevant to the discussion.
 
         Searches all sources at once — documents and filings, Slack messages, and
-        decisions from past meetings. Use it to answer the question you were just
-        asked when the answer isn't already on screen.
+        decisions from past meetings. Use it to answer a question you were asked when
+        the answer isn't already provided to you.
 
         Args:
             query: What to look up, in natural language.
@@ -482,9 +467,7 @@ class Assistant(Agent):
         snippets = [s for s in snippets if s]
         if not snippets:
             return "No relevant context found."
-        # Buffer the sources for this turn. The single display card — the spoken
-        # answer plus these citations — is published when the reply commits
-        # (publish_reply_card), so we don't publish here.
+        # Buffer sources; the card is published with the spoken reply (publish_reply_card).
         self._wm.pending_sources.extend(docs)
         return "\n\n".join(snippets)
 
@@ -597,9 +580,9 @@ async def my_agent(ctx: JobContext):
         room=ctx.room, group_id=group_id, conversation_id=ctx.room.name
     )
 
-    # Voice pipeline on LiveKit Inference + the LiveKit turn detector. TTS is wired,
-    # but the agent only actually speaks when addressed by name (see
-    # Assistant.on_user_turn_completed); ambient turns abort the reply.
+    # Voice pipeline on LiveKit Inference + the LiveKit turn detector. The agent
+    # speaks only when it interjects or is addressed (see on_user_turn_completed /
+    # tts_node); quiet turns abort before any LLM call.
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="multi"),
         tts=inference.TTS(
@@ -610,8 +593,8 @@ async def my_agent(ctx: JobContext):
         preemptive_generation=True,
     )
 
-    # Mirror the agent's spoken reply (addressed turns) to a display card, paired
-    # with the sources it cited. The spoken text IS the synthesized result.
+    # Mirror each spoken line (interjection or addressed answer) to a display card,
+    # paired with the sources it cited. publish_reply_card skips the PASS sentinel.
     bg_tasks: set = set()
 
     @session.on("conversation_item_added")
@@ -642,7 +625,7 @@ async def my_agent(ctx: JobContext):
         ),
     )
 
-    # Join silently — display-first, no spoken greeting that would interrupt.
+    # Join silently — speaks only when it has something to add or is addressed.
     await ctx.connect()
 
 
