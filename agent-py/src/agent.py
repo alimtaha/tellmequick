@@ -67,7 +67,7 @@ WAKE_NAMES = [
 INTERJECT_THRESHOLD = float(os.getenv("INTERJECT_THRESHOLD", "0.4"))
 # How long to wait for a human to answer before filling a silent gap. Cancelled the
 # instant a human starts speaking, so the agent yields the floor.
-INTERJECT_GRACE = float(os.getenv("INTERJECT_GRACE_S", "1.2"))
+INTERJECT_GRACE = float(os.getenv("INTERJECT_GRACE_S", "0.5"))
 # How many recently-surfaced results to keep for "explain what's on screen".
 RECENT_CONTEXT_MAX = 6
 
