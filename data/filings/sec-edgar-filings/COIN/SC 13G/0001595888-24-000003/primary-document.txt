@@ -1,0 +1,476 @@
+<DOCUMENT>
+<TYPE>SC 13G
+<SEQUENCE>1
+<FILENAME>COIN.txt
+<TEXT>
+SECURITIES AND EXCHANGE COMMISSION
+
+Washington, D.C. 20549
+
+SCHEDULE 13G
+
+Under the Securities Exchange Act of 1934
+
+(Amendment No:  1)
+
+Coinbase Global Inc
+--------------------------------------------------------
+(Name of Issuer)
+
+Common Stock
+--------------------------------------------------------
+(Title of Class of Securities)
+
+19260Q107
+--------------------------------------------------------
+(CUSIP Number)
+
+December 31, 2023
+--------------------------------------------------------
+(Date of Event Which Requires Filing of this Statement)
+
+Check the appropriate box to designate the rule pursuant to
+which this Schedule is filed:
+
+[x] Rule 13d-1(b)
+[ ] Rule 13d-1(c)
+[ ] Rule 13d-1(d)
+
+
+*The remainder of this cover page shall be filled out
+for a reporting person's initial filing on this form with
+respect to the subject class of securities, and for any
+subsequent amendment containing information which
+would alter the disclosures provided in a prior cover page.
+
+The information required in the remainder of this cover
+page shall not be deemed to be "filed" for the purpose
+of Section 18 of the Securities Exchange Act of 1934
+("Act") or otherwise subject to the liabilities of that
+section of the Act but shall be subject to all other
+provisions of the Act (however, see the Notes).
+
+
+
+
+
+
+
+
+
+
+
+(1)Names of reporting persons. Jane Street Group, LLC
+
+
+(2) Check the appropriate box if a member of a group
+(a) [ ]
+(b) [ ]
+
+
+(3) SEC use only
+
+(4) Citizenship or place of organization
+
+Delaware
+
+Number of shares beneficially owned by each reporting person with:
+
+(5) Sole voting power
+
+0
+
+(6) Shared voting power
+
+10,250,255
+
+(7) Sole dispositive power
+
+0
+
+(8) Shared dispositive power
+
+10,250,255
+
+(9) Aggregate amount beneficially owned by each reporting person
+
+10,250,255
+
+(10) Check if the aggregate amount in Row (9) excludes certain shares
+
+(11) Percent of class represented by amount in Row 9
+
+5.3%
+
+(12) Type of reporting person
+
+HC
+
+
+-----------------------------------------------------------------------
+
+
+(1)Names of reporting persons. Jane Street Capital, LLC
+
+
+(2) Check the appropriate box if a member of a group
+(a) [ ]
+(b) [ ]
+
+
+(3) SEC use only
+
+(4) Citizenship or place of organization
+
+Delware
+
+Number of shares beneficially owned by each reporting person with:
+
+(5) Sole voting power
+
+0
+
+(6) Shared voting power
+
+266,341
+
+(7) Sole dispositive power
+
+0
+
+(8) Shared dispositive power
+
+266,341
+
+(9) Aggregate amount beneficially owned by each reporting person
+
+10,250,255
+
+(10) Check if the aggregate amount in Row (9) excludes certain shares
+
+(11) Percent of class represented by amount in Row 9
+
+5.3%
+
+(12) Type of reporting person
+
+BD
+
+-----------------------------------------------------------------------
+
+
+
+(1)Names of reporting persons. Jane Street Global Trading, LLC
+
+
+(2) Check the appropriate box if a member of a group
+(a) [ ]
+(b) [ ]
+
+
+(3) SEC use only
+
+(4) Citizenship or place of organization
+
+Delaware
+
+Number of shares beneficially owned by each reporting person with:
+
+(5) Sole voting power
+
+0
+
+(6) Shared voting power
+
+38,774
+
+(7) Sole dispositive power
+
+0
+
+(8) Shared dispositive power
+
+38,774
+
+(9) Aggregate amount beneficially owned by each reporting person
+
+10,250,255
+
+(10) Check if the aggregate amount in Row (9) excludes certain shares
+
+(11) Percent of class represented by amount in Row 9
+
+5.3%
+
+(12) Type of reporting person
+
+OO
+
+-----------------------------------------------------------------------
+
+
+
+(1)Names of reporting persons. Jane Street Options, LLC
+
+
+(2) Check the appropriate box if a member of a group
+(a) [ ]
+(b) [ ]
+
+
+(3) SEC use only
+
+(4) Citizenship or place of organization
+
+Delaware
+
+Number of shares beneficially owned by each reporting person with:
+
+(5) Sole voting power
+
+0
+
+(6) Shared voting power
+
+9,945,140
+
+(7) Sole dispositive power
+
+0
+
+(8) Shared dispositive power
+
+9,945,140
+
+(9) Aggregate amount beneficially owned by each reporting person
+
+10,250,255
+
+(10) Check if the aggregate amount in Row (9) excludes certain shares
+
+(11) Percent of class represented by amount in Row 9
+
+5.3%
+
+(12) Type of reporting person
+
+BD
+
+-----------------------------------------------------------------------
+
+
+Item 1.
+
+Item 1(a) Name of issuer:
+-----------------------------------------------------------------------
+Coinbase Global Inc
+
+
+Item 1(b) Address of issuer's principal executive offices:
+-----------------------------------------------------------------------
+430 California St San Francisco, CA 94104, US
+
+
+Item 2.
+
+
+2(a) Name of person filing:
+----------------------------------------------------------------------
+Jane Street Group, LLC; Jane Street Capital, LLC;
+Jane Street Global Trading, LLC; Jane Street Options, LLC
+
+
+2(b) Address or principal business office or, if none, residence:
+-----------------------------------------------------------------------
+Jane Street Group, LLC
+250 Vesey Street
+6th Floor
+New York, NY 10281
+
+Jane Street Capital, LLC
+250 Vesey Street
+6th Floor
+New York, NY 10281
+
+Jane Street Global Trading, LLC
+250 Vesey Street
+6th Floor
+New York, NY 10281
+
+Jane Street Options, LLC
+250 Vesey Street
+6th Floor
+New York, NY 10281
+
+2(c) Citizenship:
+--------------------------------------------------------------------
+ See Item 4 of Cover Page
+
+
+2(d) Title of class of securities:
+-------------------------------------------------------------------
+Common Stock
+
+
+2(e) CUSIP No.:
+See Cover Page
+
+
+
+
+
+
+Item 3.
+
+If this statement is filed pursuant to Rules 13d-1(b), or 13d-2(b) or (c),
+check whether the person filing is a:
+[x] Broker or dealer registered under Section 15 of the Act;
+[ ] Bank as defined in Section 3(a)(6) of the Act;
+[ ] Insurance company as defined in Section 3(a)(19) of the Act;
+[ ] Investment company registered under Section 8 of the
+Investment Company Act of 1940;
+[ ] An investment adviser in accordance with Rule 13d-1(b)(1)(ii)(E);
+[ ] An employee benefit plan or endowment fund in accordance with
+            Rule 13d-1(b)(1)(ii)(F);
+[x] A parent holding company or control person in accordance with
+            Rule 13d-1(b)(1)(ii)(G);
+[ ] A savings associations as defined in Section 3(b) of the Federal
+            Deposit Insurance Act (12 U.S.C. 1813);
+[ ] A church plan that is excluded from the definition of an
+            investment company under section 3(c)(14) of the Investment Company
+            Act of 1940;
+[ ] A non-U.S. institution in accordance with
+            Rule 240.13d-1(b)(1)(ii)(J);
+[ ] Group, in accordance with Rule 240.13d-1(b)(1)(ii)(K). If filing
+            as a non-U.S. institution in accordance with
+            Rule 240.13d-1(b)(1)(ii)(J), please specify the type of
+            institution:
+
+
+Item 4. Ownership
+
+Provide the following information regarding the aggregate number
+and percentage of the class of securities of the issuer identified in Item 1.
+
+
+Amount beneficially owned:
+
+10,250,255
+
+
+Percent of class
+
+5.3%
+
+Number of shares as to which such person has:
+
+Sole power to vote or to direct the vote
+
+0
+
+Shared power to vote or to direct the vote
+
+10,250,255
+
+Sole power to dispose or to direct the disposition of
+
+0
+
+Shared power to dispose or to direct the disposition of
+
+10,250,255
+
+
+
+
+
+
+
+
+
+Item 5.
+
+Ownership of 5 Percent or Less of a Class. If this statement is being
+filed to report the fact that as of the date hereof the reporting person
+has ceased to be the beneficial owner of more than 5 percent of the
+class of securities, check the following [ ].
+
+
+Item 6. Ownership of More than 5 Percent on Behalf of Another Person
+
+
+
+Item 7. Identification and Classification of the Subsidiary Which
+Acquired the Security Being Reported on by the Parent Holding
+Company or Control Person.
+
+
+See Exhibit A
+
+
+Item 8. Identification and Classification of Members of the Group
+
+
+
+Item 9. Notice of Dissolution of Group
+
+
+
+Item 10. Certifications
+By signing below I certify that, to the best of my knowledge and
+belief, the securities referred to above were acquired and are
+held in the ordinary course of business and were not acquired
+and are not held for the purpose of or with the effect of changing
+or influencing the control of the issuer of the securities and were
+not acquired and are not held in connection with or as a participant
+in any transaction having that purpose or effect.
+
+Signature.
+
+After reasonable inquiry and to the best of my knowledge and
+belief, I certify that the information set forth in this statement
+is true, complete and correct.
+
+
+Dated: February 9, 2024
+Jane Street Group, LLC
+
+Signature:  Frank Liu
+
+-------------------------------------------
+
+Name: Frank Liu
+Title: Managing Director
+
+
+The original statement shall be signed by each person on whose
+behalf the statement is filed or his authorized representative.
+If the statement is signed on behalf of a person by his authorized
+representative other than an executive officer or general partner
+of the filing person, evidence of the representative's authority to
+sign on behalf of such person shall be filed with the statement,
+provided, however, that a power of attorney for this purpose
+which is already on file with the Commission may be incorporated
+by reference. The name and any title of each person who
+signs the statement shall be typed or printed beneath his signature.
+
+
+
+Attention: Intentional misstatements or omissions of fact constitute
+Federal criminal violations (see 18 U.S.C. 1001).
+
+
+Exhibit A
+
+
+
+Subsidiary
+
+
+Jane Street Capital, LLC
+Jane Street Options, LLC
+Jane Street Global Trading, LLC
+
+
+</TEXT>
+</DOCUMENT>
