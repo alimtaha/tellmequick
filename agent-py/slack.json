@@ -1,38 +1,127 @@
 [
   {
-    "id": "slack:C0FIN:1715770800.0001",
-    "text": "Reviving the Q3 events budget question — finance wants to cut it 20% to hit the margin target. Thoughts?",
-    "metadata": {
-      "source": "slack",
-      "channel": "finance",
-      "group_id": "acme-finance",
-      "user_id": "dan",
-      "timestamp": "2026-05-15T09:00:00Z",
-      "url": "https://acme.slack.com/archives/C0FIN/p1715770800"
-    }
+    "id": "slack:C_COIN:1779062400.0001",
+    "text": "Reopening the COIN thread. Coinbase just announced a restructuring — cutting ~700 roles, about 14% of staff, with a $50–60M charge, framed as 'optimizing for the AI era.' My read: cost discipline, not distress.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-18T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17790624000001"}
   },
   {
-    "id": "slack:C0FIN:1715772600.0007",
-    "text": "Pushing back — events drove about 40% of Q2 pipeline. Cutting 20% now risks H2 bookings. The Vertex contract also has a 30% cancellation fee on the remaining commitment.",
-    "metadata": {
-      "source": "slack",
-      "channel": "finance",
-      "group_id": "acme-finance",
-      "user_id": "priya",
-      "timestamp": "2026-05-15T09:30:00Z",
-      "url": "https://acme.slack.com/archives/C0FIN/p1715772600"
-    }
+    "id": "slack:C_COIN:1779064200.0002",
+    "text": "Or a company bracing for a weak tape. We passed last quarter for a reason — revenue is still tied to crypto trading volume. What's actually different now?",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-18T15:50:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17790642000002"}
   },
   {
-    "id": "slack:C0FIN:1715776200.0011",
-    "text": "Agree with Priya. Proposal: hold events flat this quarter, revisit after the May pipeline review.",
-    "metadata": {
-      "source": "slack",
-      "channel": "finance",
-      "group_id": "acme-finance",
-      "user_id": "dan",
-      "timestamp": "2026-05-15T10:30:00Z",
-      "url": "https://acme.slack.com/archives/C0FIN/p1715776200"
-    }
+    "id": "slack:C_COIN:1779148800.0003",
+    "text": "Three things changed. First, insiders aren't leaving. CFO Alesia Haas sold ~$2M of stock, but it's a pre-set 10b5-1 plan, not a discretionary sale.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-19T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17791488000003"}
+  },
+  {
+    "id": "slack:C_COIN:1779150600.0004",
+    "text": "Second, COO Emilie Choi's big 'sale' on the Form 4 is just shares withheld for taxes on a performance-RSU vest — she actually netted ~340K shares. That's the opposite of an exit.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-19T15:50:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17791506000004"}
+  },
+  {
+    "id": "slack:C_COIN:1779152400.0005",
+    "text": "OK, insider signal is benign. Who's actually holding the stock — real money or retail momentum?",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-19T16:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17791524000005"}
+  },
+  {
+    "id": "slack:C_COIN:1779235200.0006",
+    "text": "Real money. Latest 13Gs: Vanguard 7.37%, BlackRock 5.7%, Jane Street 5.3%, ARK 5.14%. Index giants, a top market maker, and Cathie — roughly 23% of the float in the top four.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-20T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17792352000006"}
+  },
+  {
+    "id": "slack:C_COIN:1779237000.0007",
+    "text": "Jane Street at 5.3% is liquidity/market-making conviction, not a long-term holder — flag that distinction for the IC so we don't overcount the 'smart money' signal.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-20T15:50:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17792370000007"}
+  },
+  {
+    "id": "slack:C_COIN:1779321600.0008",
+    "text": "Third, the diversification is real in the numbers. FY2025 total revenue was $7.18B vs $6.56B the prior year; subscription & services keeps growing as a share. The 'one-trick trading shop' bear case is weakening.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-21T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17793216000008"}
+  },
+  {
+    "id": "slack:C_COIN:1779323400.0009",
+    "text": "Weakening, not dead. Transaction revenue is still the swing factor and it's cyclical. I want the exact S&S mix % from the 10-K before we lean in.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-21T15:50:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17793234000009"}
+  },
+  {
+    "id": "slack:C_COIN:1779408000.0010",
+    "text": "Pulling the segment table from the 10-K MD&A now. Directionally S&S is up YoY; I'll have the precise split for Thursday's IC.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-22T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17794080000010"}
+  },
+  {
+    "id": "slack:C_COIN:1779840000.0011",
+    "text": "Also for the IC notes: they reincorporated Delaware → Texas in December, and a director (Paul Clement) rolled off the board. Neither is thesis-changing, just housekeeping.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-27T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17798400000011"}
+  },
+  {
+    "id": "slack:C_COIN:1779926400.0012",
+    "text": "Governance question — is management actually aligned, or just collecting equity? Check the proxy before Thursday.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-28T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17799264000012"}
+  },
+  {
+    "id": "slack:C_COIN:1780012800.0013",
+    "text": "Armstrong's base salary is only ~$350K; the bulk of his comp is multi-year equity that vests on performance. Andreessen is still on the board. Alignment looks fine.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-29T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17800128000013"}
+  },
+  {
+    "id": "slack:C_COIN:1780358400.0014",
+    "text": "Net: insiders aligned, smart money in, revenue diversifying, restructuring reads as discipline. I think the wait-and-see is over — recommending we open a small position.",
+    "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-06-02T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17803584000014"}
+  },
+  {
+    "id": "slack:C_RISK:1779494400.0015",
+    "text": "Risk thread for COIN. The thing that makes us wrong: a crypto winter. Their own 10-K names trading-volume and market-condition dependence as the top revenue risk. If volumes halve, the transaction line halves with them.",
+    "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-22T18:00:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17794944000015"}
+  },
+  {
+    "id": "slack:C_RISK:1779496200.0016",
+    "text": "Agreed that's the core risk. The S&S growth is exactly the hedge against it — but it's not big enough yet to fully offset a volume collapse.",
+    "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-22T18:30:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17794962000016"}
+  },
+  {
+    "id": "slack:C_RISK:1779840000.0017",
+    "text": "Second risk: regulatory — improved but it's still crypto. And valuation: after this run, are we paying up for a cyclical at the wrong point?",
+    "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-26T18:00:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17798400000017"}
+  },
+  {
+    "id": "slack:C_RISK:1779841800.0018",
+    "text": "Position-sizing rule for this name: if we buy, it's a starter — no more than 1% of NAV — until we see one more clean quarter of S&S mix expansion.",
+    "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-26T18:30:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17798418000018"}
+  },
+  {
+    "id": "slack:C_RISK:1779928200.0019",
+    "text": "Works. Starter sizing also limits the downside if the restructuring is masking weaker Q2 volumes.",
+    "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-27T18:30:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17799282000019"}
+  },
+  {
+    "id": "slack:C_RISK:1780360200.0020",
+    "text": "Flag the convertible notes for the writeup — Coinbase has outstanding convertible debt across several maturities. I want the dilution picture before we add beyond a starter.",
+    "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-02T18:30:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17803602000020"}
+  },
+  {
+    "id": "slack:C_ICPREP:1780099200.0021",
+    "text": "Putting COIN back on Thursday's IC agenda. Reminder: we passed three weeks ago pending the print and restructuring clarity — this is the revisit, not a fresh pitch.",
+    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-30T18:00:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17800992000021"}
+  },
+  {
+    "id": "slack:C_ICPREP:1780101000.0022",
+    "text": "Got it. I'll lead with what changed since the pass: the insider 10b5-1 detail, the holder base, the revenue mix, and the restructuring rationale.",
+    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-30T18:30:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17801010000022"}
+  },
+  {
+    "id": "slack:C_ICPREP:1780444800.0023",
+    "text": "Keep it tight — I want the buy/no-buy call decided in the room Thursday. Bring the exact S&S % and the holder table.",
+    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-03T18:00:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17804448000023"}
+  },
+  {
+    "id": "slack:C_ICPREP:1780446600.0024",
+    "text": "Will do. One open item I can't source: their actual AI product roadmap — the 'AI era' framing is in the 8-K but there's no product detail in the filings. I'll flag it as unknown, not guess.",
+    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-06-03T18:30:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17804466000024"}
+  },
+  {
+    "id": "slack:C_ICPREP:1780448400.0025",
+    "text": "Good — don't guess on that. If it's not in the filings we treat it as unknown in the memo.",
+    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-03T19:00:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17804484000025"}
   }
 ]
