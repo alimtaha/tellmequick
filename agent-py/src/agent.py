@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 import logging
@@ -121,6 +122,10 @@ class WorkingMemory:
     surfaced_card_ids: set[str] = field(default_factory=set)
     recent_context: list[str] = field(default_factory=list)  # last surfaced snippets
     pending_decisions: list[Decision] = field(default_factory=list)
+    # Per-addressed-turn buffer: sources retrieved this turn + the question asked,
+    # paired with the spoken reply into one display card when the reply commits.
+    pending_sources: list = field(default_factory=list)
+    pending_query: str = ""
 
 
 def resolve_decisions(pending: list[Decision]) -> list[Decision]:
@@ -274,8 +279,13 @@ class Assistant(Agent):
         self.record_turn("user", text)
 
         if is_addressed(text):
-            # Addressed by name → speak. Give the LLM whatever is already on screen
-            # so it can "explain the results it displayed", then let the reply run.
+            # Addressed by name → speak. Reset the per-turn source buffer and record
+            # the question; search_context fills the buffer, and the spoken reply is
+            # mirrored to a card (publish_reply_card) when it commits.
+            self._wm.pending_sources = []
+            self._wm.pending_query = text
+            # Give the LLM whatever is already on screen so it can "explain the
+            # results it displayed", then let the reply run.
             if self._wm.recent_context:
                 turn_ctx.add_message(
                     role="assistant",
@@ -376,6 +386,20 @@ class Assistant(Agent):
             if len(self._wm.recent_context) > RECENT_CONTEXT_MAX:
                 self._wm.recent_context = self._wm.recent_context[-RECENT_CONTEXT_MAX:]
 
+    async def publish_reply_card(self, answer: str) -> None:
+        """Mirror the voice agent's spoken reply (the synthesized result) to a display
+        card, paired with the sources it cited this turn. Called when an addressed
+        reply commits. One card, no extra LLM call — the spoken text IS the synthesis."""
+        answer = (answer or "").strip()
+        if not answer:
+            return
+        sources = self._wm.pending_sources
+        self._wm.pending_sources = []
+        self._mark_surfaced(sources, answer)
+        await self._publish_context(
+            self._wm.pending_query or "(spoken reply)", sources, None, answer=answer
+        )
+
     # ---- working memory -------------------------------------------------------
 
     def record_turn(self, role: str, text: str) -> None:
@@ -455,10 +479,10 @@ class Assistant(Agent):
         snippets = [s for s in snippets if s]
         if not snippets:
             return "No relevant context found."
-        # In addressed mode the agent SPEAKS the synthesis, so the card shows the
-        # sources (citations) for what it's about to say — no separate synthesis.
-        self._mark_surfaced(docs, " / ".join(snippets[:2]))
-        await self._publish_context(query, docs, getattr(result, "time_taken_ms", None))
+        # Buffer the sources for this turn. The single display card — the spoken
+        # answer plus these citations — is published when the reply commits
+        # (publish_reply_card), so we don't publish here.
+        self._wm.pending_sources.extend(docs)
         return "\n\n".join(snippets)
 
     @function_tool()
@@ -582,6 +606,22 @@ async def my_agent(ctx: JobContext):
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )
+
+    # Mirror the agent's spoken reply (addressed turns) to a display card, paired
+    # with the sources it cited. The spoken text IS the synthesized result.
+    bg_tasks: set = set()
+
+    @session.on("conversation_item_added")
+    def _on_item(ev):
+        item = ev.item
+        if (
+            isinstance(item, ChatMessage)
+            and item.role == "assistant"
+            and item.text_content
+        ):
+            task = asyncio.create_task(assistant.publish_reply_card(item.text_content))
+            bg_tasks.add(task)
+            task.add_done_callback(bg_tasks.discard)
 
     # Persist decisions when the meeting ends (room empties). Shutdown hooks must
     # finish within ~10s (tunable via shutdown_process_timeout in server options).

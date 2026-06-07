@@ -212,7 +212,9 @@ async def test_addressed_turn_speaks_and_injects_screen_context(stub_moss) -> No
 # ---- search_context (only reachable when addressed) ---------------------------
 
 
-async def test_search_context_queries_all_indexes_and_publishes(stub_moss) -> None:
+async def test_search_context_queries_and_buffers_sources(stub_moss) -> None:
+    """search_context returns snippets to the LLM and BUFFERS the sources — the card
+    is published later with the spoken reply, not immediately."""
     room = _FakeRoom()
     assistant = Assistant(room=room, group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
@@ -242,10 +244,28 @@ async def test_search_context_queries_all_indexes_and_publishes(stub_moss) -> No
     assert options.top_k == 6
     assert options.filter == {"field": "group_id", "condition": {"$eq": GROUP_ID}}
 
+    # Sources buffered for the reply card; nothing published yet.
+    assert len(assistant._wm.pending_sources) == 2
+    assert room.local_participant.published == []
+
+
+async def test_publish_reply_card_mirrors_spoken_answer_with_sources(stub_moss) -> None:
+    """The voice agent's spoken reply is mirrored to a card with its cited sources."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+    assistant._wm.pending_query = "what did we decide about events?"
+    assistant._wm.pending_sources = [
+        _FakeDoc("Hold events flat.", doc_id="meet:1", metadata={"source": "meeting"})
+    ]
+
+    await assistant.publish_reply_card("We decided to hold the events budget flat.")
+
     payload = _decoded(room.local_participant.published)
     assert payload["type"] == "moss_context"
-    assert set(payload["data"]) == {"query", "matches", "time_taken_ms", "timestamp"}
-    assert payload["data"]["matches"][0]["score"] == 0.91
+    assert payload["data"]["answer"] == "We decided to hold the events budget flat."
+    assert payload["data"]["matches"][0]["text"] == "Hold events flat."
+    # Buffer cleared after publishing.
+    assert assistant._wm.pending_sources == []
 
 
 async def test_search_context_is_read_only(stub_moss) -> None:
