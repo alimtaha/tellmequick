@@ -1,0 +1,16 @@
+[
+  {
+    "id": "acme-finance:m-2026-05-01:decision:0",
+    "text": "Decision (May 1 finance review): hold the Q3 events budget flat and revisit after the May pipeline review. Rationale: events drove ~40% of Q2 pipeline; the Vertex contract carries a 30% cancellation fee. Owner: Priya.",
+    "metadata": {
+      "source": "meeting",
+      "kind": "decision",
+      "is_decision": "true",
+      "owner": "priya",
+      "group_id": "acme-finance",
+      "conversation_id": "m-2026-05-01",
+      "topic": "events-budget",
+      "timestamp": "2026-05-01T15:00:00Z"
+    }
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "slack:C0FIN:1715770800.0001",
+    "text": "Reviving the Q3 events budget question — finance wants to cut it 20% to hit the margin target. Thoughts?",
+    "metadata": {
+      "source": "slack",
+      "channel": "finance",
+      "group_id": "acme-finance",
+      "user_id": "dan",
+      "timestamp": "2026-05-15T09:00:00Z",
+      "url": "https://acme.slack.com/archives/C0FIN/p1715770800"
+    }
+  },
+  {
+    "id": "slack:C0FIN:1715772600.0007",
+    "text": "Pushing back — events drove about 40% of Q2 pipeline. Cutting 20% now risks H2 bookings. The Vertex contract also has a 30% cancellation fee on the remaining commitment.",
+    "metadata": {
+      "source": "slack",
+      "channel": "finance",
+      "group_id": "acme-finance",
+      "user_id": "priya",
+      "timestamp": "2026-05-15T09:30:00Z",
+      "url": "https://acme.slack.com/archives/C0FIN/p1715772600"
+    }
+  },
+  {
+    "id": "slack:C0FIN:1715776200.0011",
+    "text": "Agree with Priya. Proposal: hold events flat this quarter, revisit after the May pipeline review.",
+    "metadata": {
+      "source": "slack",
+      "channel": "finance",
+      "group_id": "acme-finance",
+      "user_id": "dan",
+      "timestamp": "2026-05-15T10:30:00Z",
+      "url": "https://acme.slack.com/archives/C0FIN/p1715776200"
+    }
+  }
+]

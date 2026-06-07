@@ -1,15 +1,19 @@
-"""Build the Moss indexes used by this voice agent.
+"""Build the three Moss indexes used by tellmequick.
 
-Creates two indexes from the credentials in ``agent-py/.env.local``:
+* ``knowledge`` — filings / documents (seed: ``knowledge.json``)
+* ``slack``     — Slack messages       (seed: ``slack.json``)
+* ``meetings``  — distilled notes + decisions from past meetings (seed: ``meetings.json``)
 
-* the static ``knowledge`` index (RAG corpus), seeded from ``agent-py/knowledge.json``
-* the ``memory`` index (per-user agentic memory), seeded with a single placeholder
-  document so the index exists and can be loaded before the first runtime write.
+All three are read-only during a live meeting; ``meetings`` is additionally
+written post-meeting by the agent's distillation pass (see ``agent.py``).
 
 Run from the repo root via ``pnpm moss:index`` (which invokes
 ``uv --directory agent-py run src/create_index.py``) once Moss credentials are set.
-This script needs ``MOSS_PROJECT_ID`` / ``MOSS_PROJECT_KEY`` to run; without them it
-exits with a clear message instead of contacting Moss.
+Requires ``MOSS_PROJECT_ID`` / ``MOSS_PROJECT_KEY`` in ``agent-py/.env.local``.
+
+Idempotent: an existing index of the same name is deleted and rebuilt, so
+re-running with refreshed seed data is safe. The Moss tier caps this account at
+three indexes, which is exactly what this script creates.
 """
 
 from __future__ import annotations
@@ -22,33 +26,30 @@ from pathlib import Path
 from dotenv import load_dotenv
 from moss import DocumentInfo, MossClient
 
-# Resolve paths relative to this file so the script works regardless of the
-# current working directory. ``src/create_index.py`` -> parent.parent == agent-py/.
+# Resolve paths relative to this file: src/create_index.py -> parent.parent == agent-py/.
 AGENT_DIR = Path(__file__).resolve().parent.parent
-KNOWLEDGE_PATH = AGENT_DIR / "knowledge.json"
 ENV_PATH = AGENT_DIR / ".env.local"
-
-DEFAULT_MODEL_ID = "moss-minilm"
-DEFAULT_KNOWLEDGE_INDEX = "knowledge"
-DEFAULT_MEMORY_INDEX = "memory"
-
-# Load environment variables from agent-py/.env.local.
 load_dotenv(ENV_PATH)
 
+DEFAULT_MODEL_ID = "moss-minilm"
+DEFAULT_GROUP_ID = os.getenv("DEFAULT_GROUP_ID", "acme-finance")
 
-def _load_knowledge_documents() -> list[DocumentInfo]:
-    """Load knowledge.json into a list of Moss DocumentInfo entries."""
-    if not KNOWLEDGE_PATH.exists():
-        raise FileNotFoundError(f"Knowledge data file not found at {KNOWLEDGE_PATH}.")
+# (env var, default index name, seed filename, default source label)
+INDEXES = [
+    ("MOSS_KNOWLEDGE_INDEX", "knowledge", "knowledge.json", "doc"),
+    ("MOSS_SLACK_INDEX", "slack", "slack.json", "slack"),
+    ("MOSS_MEETINGS_INDEX", "meetings", "meetings.json", "meeting"),
+]
 
-    with KNOWLEDGE_PATH.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
 
-    if not isinstance(data, list):
-        raise ValueError("knowledge.json must be a list of document entries.")
+def _coerce_docs(raw: list, default_source: str) -> list[DocumentInfo]:
+    """Turn raw JSON entries into Moss DocumentInfo with string-only metadata.
 
-    documents: list[DocumentInfo] = []
-    for entry in data:
+    Every doc gets a ``source`` and a ``group_id`` (defaulted) so the agent's
+    ``group_id`` retrieval filter matches uniformly across all sources.
+    """
+    docs: list[DocumentInfo] = []
+    for entry in raw:
         if not isinstance(entry, dict):
             continue
         doc_id = entry.get("id")
@@ -56,29 +57,34 @@ def _load_knowledge_documents() -> list[DocumentInfo]:
         if not doc_id or not text:
             continue
         metadata = entry.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        metadata.setdefault("source", default_source)
+        metadata.setdefault("group_id", DEFAULT_GROUP_ID)
         # Moss metadata values must be strings.
         metadata = {str(k): str(v) for k, v in metadata.items()}
-        documents.append(DocumentInfo(id=str(doc_id), text=str(text), metadata=metadata))
-
-    if not documents:
-        raise ValueError("No valid documents were loaded from knowledge.json.")
-
-    return documents
+        docs.append(DocumentInfo(id=str(doc_id), text=str(text), metadata=metadata))
+    return docs
 
 
-def _memory_seed_documents() -> list[DocumentInfo]:
-    """A single placeholder doc so the memory index exists and loads cleanly.
+def _load_seed(filename: str, default_source: str) -> list[DocumentInfo]:
+    path = AGENT_DIR / filename
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, list):
+        raise ValueError(f"{filename} must be a JSON list of document entries.")
+    return _coerce_docs(raw, default_source)
 
-    The agent's memory tools upsert real per-user documents at runtime (matching
-    ``id`` upserts). This seed is filtered out at query time by its ``user_id``.
-    """
+
+def _placeholder(index_name: str) -> list[DocumentInfo]:
+    """Moss needs >=1 doc to create an index. Seed an empty one that the agent's
+    ``group_id`` filter excludes (it carries ``group_id="__seed__"``)."""
     return [
         DocumentInfo(
-            id="__seed__",
-            text="(memory seed) placeholder document so the memory index can be loaded before the first write.",
-            metadata={"user_id": "__seed__"},
+            id=f"__seed__:{index_name}",
+            text=f"(seed) placeholder so the {index_name} index can be created before real data lands.",
+            metadata={"source": "__seed__", "group_id": "__seed__"},
         )
     ]
 
@@ -86,54 +92,35 @@ def _memory_seed_documents() -> list[DocumentInfo]:
 async def build_indexes() -> None:
     project_id = os.getenv("MOSS_PROJECT_ID")
     project_key = os.getenv("MOSS_PROJECT_KEY")
-    knowledge_index = os.getenv("MOSS_INDEX_NAME", DEFAULT_KNOWLEDGE_INDEX)
-    memory_index = os.getenv("MOSS_MEMORY_INDEX_NAME", DEFAULT_MEMORY_INDEX)
     model_id = os.getenv("MOSS_MODEL_ID", DEFAULT_MODEL_ID)
 
-    missing = [
-        name
-        for name, value in {
-            "MOSS_PROJECT_ID": project_id,
-            "MOSS_PROJECT_KEY": project_key,
-        }.items()
-        if not value
-    ]
-    if missing:
+    if not project_id or not project_key:
         raise OSError(
-            "Missing required Moss environment variables: "
-            + ", ".join(missing)
-            + f". Set them in {ENV_PATH} before running this script."
+            "Missing MOSS_PROJECT_ID / MOSS_PROJECT_KEY. "
+            f"Set them in {ENV_PATH} before running this script."
         )
-
-    assert project_id is not None
-    assert project_key is not None
-
-    knowledge_docs = _load_knowledge_documents()
-    memory_docs = _memory_seed_documents()
 
     client = MossClient(project_id, project_key)
 
-    print(
-        f"Creating Moss knowledge index '{knowledge_index}' with "
-        f"{len(knowledge_docs)} docs using model '{model_id}'..."
-    )
-    knowledge_result = await client.create_index(knowledge_index, knowledge_docs, model_id)
-    print(
-        f"  done (job: {knowledge_result.job_id}, index: {knowledge_result.index_name}, "
-        f"docs: {knowledge_result.doc_count})"
-    )
+    for env_var, default_name, seed_file, source_label in INDEXES:
+        name = os.getenv(env_var, default_name)
+        docs = _load_seed(seed_file, source_label)
+        if not docs:
+            docs = _placeholder(name)
+            print(f"[{name}] no docs in {seed_file}; creating with a placeholder.")
 
-    print(
-        f"Creating Moss memory index '{memory_index}' with "
-        f"{len(memory_docs)} seed doc(s) using model '{model_id}'..."
-    )
-    memory_result = await client.create_index(memory_index, memory_docs, model_id)
-    print(
-        f"  done (job: {memory_result.job_id}, index: {memory_result.index_name}, "
-        f"docs: {memory_result.doc_count})"
-    )
+        # Idempotent rebuild: drop any existing index of the same name first.
+        try:
+            await client.delete_index(name)
+            print(f"[{name}] deleted existing index.")
+        except Exception:
+            pass  # index didn't exist — fine.
 
-    print("Both Moss indexes created. Knowledge (RAG) and memory are ready for use.")
+        print(f"[{name}] creating with {len(docs)} doc(s) using model '{model_id}'...")
+        result = await client.create_index(name, docs, model_id)
+        print(f"[{name}] done (job: {result.job_id}, docs: {result.doc_count}).")
+
+    print("All three Moss indexes built: knowledge, slack, meetings.")
 
 
 if __name__ == "__main__":
