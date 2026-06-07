@@ -3,9 +3,9 @@ import contextlib
 import json
 import logging
 import os
+import random
 import re
 import textwrap
-from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -18,7 +18,6 @@ from livekit.agents import (
     ChatMessage,
     JobContext,
     JobProcess,
-    ModelSettings,
     RunContext,
     StopResponse,
     cli,
@@ -51,27 +50,36 @@ DEFAULT_GROUP_ID = os.getenv("DEFAULT_GROUP_ID", "acme-finance")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-5.2-chat-latest")
 
 # --- Interaction model: an interjecting "third participant" ------------------
-# The agent listens. After each turn it does ONE retrieval; if a strong, fresh
-# match turns up it lets its LLM decide whether to chime in out loud (or PASS to
-# stay quiet). It also answers when addressed by name. No silent-synthesis path,
-# no second model — one LLM, one retrieval.
-#
-# Wake names for explicit address. STT usually renders "tellmequick" as the
-# phrase "tell me quick".
+# The agent listens. After each turn one cheap Moss retrieval gates whether it
+# speaks. On a strong, fresh match it commits: it says a quick filler IMMEDIATELY
+# (masking generation latency) while its LLM produces the grounded reply, which
+# streams right after. Below the bar it stays silent (no LLM call). It also
+# answers when addressed by name.
 WAKE_NAMES = [
     n.strip().lower()
     for n in os.getenv("AGENT_WAKE_NAMES", "tellmequick,tell me quick").split(",")
     if n.strip()
 ]
-# The agent only *considers* interjecting when a hit scores at/above this. Speaking
-# interrupts humans, so this bar is higher than a glanceable card would warrant.
-# Tune per corpus; every turn logs the top score. Below the bar = instant silence,
-# no LLM call.
+# Speaking interrupts humans, so this bar is higher than a glanceable card would
+# warrant. Tune per corpus; every turn logs the top score. Below the bar = instant
+# silence, no LLM call.
 INTERJECT_THRESHOLD = float(os.getenv("INTERJECT_THRESHOLD", "0.4"))
-# Sentinel the LLM emits to decline interjecting; suppressed before TTS.
-INTERJECT_PASS = "PASS"
 # How many recently-surfaced results to keep for "explain what's on screen".
 RECENT_CONTEXT_MAX = 6
+
+# Quick fillers spoken the instant the agent commits to speaking, so it feels
+# responsive while the real reply generates in the background.
+FILLER_PROACTIVE = [
+    "Hmm, I think we touched on this — let me pull it up.",
+    "Actually, there's something relevant here — one second.",
+    "I recall we covered this; let me find it.",
+    "Hold on, I've got something on that.",
+]
+FILLER_ADDRESSED = [
+    "Let me check that.",
+    "One second, pulling that up.",
+    "Let me look that up for you.",
+]
 
 
 def _now_iso() -> str:
@@ -184,10 +192,11 @@ def build_meeting_docs(
 class Assistant(Agent):
     """tellmequick: a real-time context copilot that behaves like a third participant.
 
-    It listens, and after each turn does one retrieval. On a strong, fresh match it
-    lets its LLM decide whether to chime in out loud with the relevant context (or
-    stay quiet). It also answers when addressed by name. Spoken lines are mirrored to
-    display cards. Decisions are persisted post-meeting (no Moss writes mid-meeting).
+    It listens; one cheap retrieval after each turn gates whether it speaks. On a
+    strong, fresh match it says a quick filler immediately (so it feels responsive)
+    while its LLM produces the grounded reply, which streams right after. It also
+    answers when addressed by name. Spoken lines are mirrored to display cards.
+    Decisions are persisted post-meeting (no Moss writes mid-meeting).
     """
 
     def __init__(
@@ -205,18 +214,20 @@ class Assistant(Agent):
                 a knowledgeable third participant. You can see the team's documents,
                 Slack history, and decisions from past meetings.
 
-                You produce a reply in exactly two situations, both signalled by an
-                instruction injected as the latest assistant message:
+                A short filler ("let me pull that up") is spoken for you the instant
+                you're triggered — do NOT repeat it. Get straight to the substance.
 
-                1) PROACTIVE CHECK — you're shown relevant prior context that just came
-                   up. If it adds something specific, useful, and non-obvious to what
-                   was just said, chime in with ONE short sentence. If it doesn't (it's
-                   obvious, off-topic, or unhelpful), reply with exactly: PASS
-                   (nothing else). You will then stay silent.
+                You produce a reply in two situations, signalled by an instruction
+                injected as the latest assistant message:
+
+                1) PROACTIVE — relevant prior context just came up. In ONE short
+                   sentence, surface the most useful, non-obvious point from it for
+                   what was just said. If what the team needs is genuinely ambiguous,
+                   instead ask ONE short clarifying question.
 
                 2) ADDRESSED — a participant called you by name. Answer their question.
-                   Use search_context to look things up if the answer isn't already
-                   provided to you.
+                   Use search_context for anything not already provided to you. If the
+                   ask is ambiguous, ask one short clarifying question.
 
                 When the team concludes or agrees on something, call mark_decision with
                 a one-sentence summary, a short topic key, and the owner if named. It's
@@ -238,8 +249,6 @@ class Assistant(Agent):
         )
         self._wm = WorkingMemory(conversation_id=conversation_id, group_id=group_id)
         self._indexes_loaded = False
-        # True on proactive turns: TTS is gated on the PASS sentinel for these.
-        self._expect_pass = False
 
     async def on_enter(self) -> None:
         # Preload all three indexes so the first retrieval is fast. Guarded: log and
@@ -259,17 +268,16 @@ class Assistant(Agent):
         self, turn_ctx: ChatContext, new_message: ChatMessage
     ) -> None:
         """Runs after every user turn, before any reply. Decides whether the agent
-        speaks: addressed → answer; strong fresh match → let the LLM interject (or
-        PASS); otherwise → stay silent (no LLM call)."""
+        speaks: addressed → answer; strong fresh match → commit (filler now, grounded
+        reply streams after); otherwise → stay silent (no LLM call)."""
         text = new_message.text_content or ""
         self.record_turn("user", text)
-        self._expect_pass = False
 
         if is_addressed(text):
-            # Explicit address → answer. Reset the per-turn buffer, record the
-            # question, and hand the LLM whatever is already on screen.
+            # Explicit address → answer. Quick filler, then the pipeline answers.
             self._wm.pending_sources = []
             self._wm.pending_query = text
+            self._say_filler(FILLER_ADDRESSED)
             if self._wm.recent_context:
                 turn_ctx.add_message(
                     role="assistant",
@@ -282,7 +290,8 @@ class Assistant(Agent):
                 role="assistant",
                 content=(
                     "[Addressed] A participant called you by name. Answer concisely; "
-                    "use search_context for anything not already shown."
+                    "use search_context for anything not already shown. If the ask is "
+                    "ambiguous, ask one short clarifying question."
                 ),
             )
             return  # let the pipeline answer + speak
@@ -311,10 +320,11 @@ class Assistant(Agent):
         if all(getattr(d, "id", None) in self._wm.surfaced_card_ids for d in relevant):
             raise StopResponse()  # already surfaced this context — don't repeat
 
-        # Strong, fresh match → let the LLM decide to interject or PASS.
+        # Commit: acknowledge instantly, then generate the grounded reply in the
+        # background (it streams right after the filler).
         self._wm.pending_sources = list(relevant)
         self._wm.pending_query = text
-        self._expect_pass = True
+        self._say_filler(FILLER_PROACTIVE)
         sources = "\n".join(
             f"- ({(getattr(d, 'metadata', {}) or {}).get('source', '?')}) "
             f"{(getattr(d, 'text', '') or '').strip()}"
@@ -323,37 +333,26 @@ class Assistant(Agent):
         turn_ctx.add_message(
             role="assistant",
             content=(
-                f"[Proactive check] Relevant prior context just surfaced:\n{sources}\n\n"
-                "If this adds something specific, useful, and non-obvious to what was "
-                "just said, interject in one short sentence. Otherwise reply with "
-                "exactly PASS."
+                f"[Proactive] Relevant prior context just surfaced:\n{sources}\n\n"
+                "In ONE short sentence, surface the most useful, non-obvious point "
+                "from this for what was just said. If what they need is genuinely "
+                "ambiguous, instead ask ONE short clarifying question."
             ),
         )
-        return  # let the pipeline run; tts_node suppresses a PASS
+        return  # let the pipeline generate + stream the reply
 
-    # ---- TTS gating (suppress declined interjections) -------------------------
-
-    async def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
-        """On proactive turns, buffer the reply and stay silent if the LLM declined
-        with PASS. On addressed turns, stream normally (no added latency)."""
-        if not self._expect_pass:
-            async for frame in Agent.default.tts_node(self, text, model_settings):
-                yield frame
-            return
-
-        buffered = ""
-        async for chunk in text:
-            buffered += chunk
-        stripped = buffered.strip()
-        if not stripped or stripped.upper().startswith(INTERJECT_PASS):
-            logger.info("proactive turn: LLM declined (PASS) — staying silent")
-            return  # declined → no audio
-
-        async def _single() -> AsyncIterable[str]:
-            yield buffered
-
-        async for frame in Agent.default.tts_node(self, _single(), model_settings):
-            yield frame
+    def _say_filler(self, fillers: list[str]) -> None:
+        """Speak a quick filler immediately (non-blocking) so the agent feels
+        responsive while the real reply generates. Best-effort — never let it break
+        the turn, and don't add it to the chat context."""
+        try:
+            self.session.say(
+                random.choice(fillers),
+                allow_interruptions=True,
+                add_to_chat_ctx=False,
+            )
+        except Exception:
+            logger.debug("could not play filler (no active session?)")
 
     # ---- retrieval helpers ----------------------------------------------------
 
@@ -377,13 +376,12 @@ class Assistant(Agent):
 
     async def publish_reply_card(self, answer: str) -> None:
         """Mirror a spoken line (interjection or addressed answer) to a display card,
-        paired with the sources for that turn. Skips the PASS sentinel. Clears the
-        per-turn buffer."""
+        paired with the sources for that turn. Clears the per-turn buffer."""
         answer = (answer or "").strip()
         sources = self._wm.pending_sources
         self._wm.pending_sources = []
-        if not answer or answer.upper().startswith(INTERJECT_PASS):
-            return  # declined → no card
+        if not answer:
+            return
         self._mark_surfaced(sources, answer)
         await self._publish_context(
             self._wm.pending_query or "(interjection)", sources, None, answer=answer
@@ -580,9 +578,9 @@ async def my_agent(ctx: JobContext):
         room=ctx.room, group_id=group_id, conversation_id=ctx.room.name
     )
 
-    # Voice pipeline on LiveKit Inference + the LiveKit turn detector. The agent
-    # speaks only when it interjects or is addressed (see on_user_turn_completed /
-    # tts_node); quiet turns abort before any LLM call.
+    # Voice pipeline on LiveKit Inference + the LiveKit turn detector. The reply
+    # streams (no buffering); a quick filler is spoken first to mask generation
+    # latency. The agent speaks only when it interjects or is addressed.
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="multi"),
         tts=inference.TTS(
@@ -593,8 +591,9 @@ async def my_agent(ctx: JobContext):
         preemptive_generation=True,
     )
 
-    # Mirror each spoken line (interjection or addressed answer) to a display card,
-    # paired with the sources it cited. publish_reply_card skips the PASS sentinel.
+    # Mirror each spoken reply (interjection or addressed answer) to a display card,
+    # paired with the sources it cited. Fillers use add_to_chat_ctx=False, so they
+    # don't fire this event and don't produce cards.
     bg_tasks: set = set()
 
     @session.on("conversation_item_added")

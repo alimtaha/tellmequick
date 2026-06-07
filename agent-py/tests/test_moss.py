@@ -128,9 +128,9 @@ def test_is_addressed_false_for_normal_talk() -> None:
 # ---- on_user_turn_completed: the interjection gate ----------------------------
 
 
-async def test_proactive_strong_match_lets_llm_decide(stub_moss) -> None:
+async def test_proactive_strong_match_commits(stub_moss) -> None:
     """A strong, fresh match does NOT abort the reply — it injects the context and
-    lets the pipeline LLM interject (or PASS). Sources are buffered for the card."""
+    lets the pipeline LLM generate the grounded reply. Sources are buffered."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._moss.query_result = _FakeSearchResult(
         [
@@ -144,16 +144,15 @@ async def test_proactive_strong_match_lets_llm_decide(stub_moss) -> None:
     )
 
     turn_ctx = _FakeTurnCtx()
-    # Must not raise StopResponse — the LLM gets to decide.
+    # Must not raise StopResponse — the agent commits to speaking.
     await assistant.on_user_turn_completed(
         turn_ctx, _FakeMessage("what about the events budget")
     )
 
-    assert assistant._expect_pass is True
     assert len(assistant._wm.pending_sources) == 1
     injected = _joined_injections(turn_ctx)
     assert "Hold events flat." in injected
-    assert "Proactive check" in injected
+    assert "Proactive" in injected
 
 
 async def test_proactive_weak_match_stays_silent(stub_moss) -> None:
@@ -169,7 +168,6 @@ async def test_proactive_weak_match_stays_silent(stub_moss) -> None:
 
     assert turn_ctx.added == []
     assert assistant._wm.pending_sources == []
-    assert assistant._expect_pass is False
 
 
 async def test_proactive_already_surfaced_stays_silent(stub_moss) -> None:
@@ -187,8 +185,7 @@ async def test_proactive_already_surfaced_stays_silent(stub_moss) -> None:
 
 
 async def test_addressed_turn_answers_and_injects_screen_context(stub_moss) -> None:
-    """An addressed turn does NOT abort the reply, injects what's on screen, and is
-    not gated on PASS (it always answers)."""
+    """An addressed turn does NOT abort the reply and injects what's on screen."""
     assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
     assistant._wm.recent_context = ["Hold events flat (decided in May review)."]
 
@@ -197,7 +194,6 @@ async def test_addressed_turn_answers_and_injects_screen_context(stub_moss) -> N
         turn_ctx, _FakeMessage("tellmequick, can you explain that?")
     )
 
-    assert assistant._expect_pass is False
     assert assistant._wm.pending_query.lower().startswith("tellmequick")
     injected = _joined_injections(turn_ctx)
     assert "Hold events flat" in injected
@@ -278,13 +274,13 @@ async def test_publish_reply_card_mirrors_spoken_answer_with_sources(stub_moss) 
     assert assistant._wm.pending_sources == []
 
 
-async def test_publish_reply_card_skips_pass(stub_moss) -> None:
-    """A declined interjection (PASS) produces no card and clears the buffer."""
+async def test_publish_reply_card_skips_empty(stub_moss) -> None:
+    """An empty reply produces no card and clears the buffer."""
     room = _FakeRoom()
     assistant = Assistant(room=room, group_id=GROUP_ID)
     assistant._wm.pending_sources = [_FakeDoc("x", doc_id="x")]
 
-    await assistant.publish_reply_card("PASS")
+    await assistant.publish_reply_card("   ")
 
     assert room.local_participant.published == []
     assert assistant._wm.pending_sources == []
