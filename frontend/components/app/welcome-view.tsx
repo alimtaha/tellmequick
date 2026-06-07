@@ -1,3 +1,7 @@
+'use client';
+
+import { useState } from 'react';
+import { Loader } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 function WelcomeImage() {
@@ -20,7 +24,7 @@ function WelcomeImage() {
 
 interface WelcomeViewProps {
   startButtonText: string;
-  onStartCall: () => void;
+  onStartCall: () => void | Promise<void>;
 }
 
 export const WelcomeView = ({
@@ -28,38 +32,48 @@ export const WelcomeView = ({
   onStartCall,
   ref,
 }: React.ComponentProps<'div'> & WelcomeViewProps) => {
+  // Connecting takes a few seconds (token + room + agent dispatch). Show an
+  // immediate "Joining…" state so the click registers; the view swaps to the
+  // meeting once connected (handled by the ViewController).
+  const [joining, setJoining] = useState(false);
+
+  const handleJoin = async () => {
+    if (joining) return;
+    setJoining(true);
+    try {
+      await onStartCall();
+      // On success the meeting view replaces this one; keep the spinner until then.
+    } catch {
+      setJoining(false);
+    }
+  };
+
   return (
     <div ref={ref}>
       <section className="bg-background flex flex-col items-center justify-center text-center">
         <WelcomeImage />
 
         <p className="text-foreground max-w-prose pt-1 leading-6 font-medium">
-          Start a meeting and tellmequick surfaces the context you need, live.
+          Join a meeting and tellmequick surfaces the context you need, live.
         </p>
 
         <Button
           size="lg"
-          onClick={onStartCall}
-          className="mt-6 w-64 rounded-full font-mono text-xs font-bold tracking-wider uppercase"
+          onClick={handleJoin}
+          disabled={joining}
+          aria-busy={joining}
+          className="mt-6 inline-flex w-64 items-center justify-center rounded-full font-mono text-xs font-bold tracking-wider uppercase"
         >
-          {startButtonText}
+          {joining ? (
+            <>
+              <Loader className="mr-2 size-4 animate-spin" />
+              Joining…
+            </>
+          ) : (
+            startButtonText
+          )}
         </Button>
       </section>
-
-      <div className="fixed bottom-5 left-0 flex w-full items-center justify-center">
-        <p className="text-muted-foreground max-w-prose pt-1 text-xs leading-5 font-normal text-pretty md:text-sm">
-          Need help getting set up? Check out the{' '}
-          <a
-            target="_blank"
-            rel="noopener noreferrer"
-            href="https://docs.livekit.io/agents/start/voice-ai/"
-            className="underline"
-          >
-            Voice AI quickstart
-          </a>
-          .
-        </p>
-      </div>
     </div>
   );
 };
