@@ -4,10 +4,6 @@ import React from 'react';
 import { RoomEvent } from 'livekit-client';
 import { PhoneOff } from 'lucide-react';
 import { useAgent, useRoomContext, useSessionContext } from '@livekit/components-react';
-import {
-  AgentControlBar,
-  type AgentControlBarControls,
-} from '@/components/agents-ui/agent-control-bar';
 import { AskInput } from '@/components/app/ask-input';
 import { CardFeed } from '@/components/app/card-feed';
 import { SAMPLE_CARDS } from '@/components/app/cards/card-types';
@@ -50,8 +46,9 @@ export interface AgentSessionView_01Props {
 /**
  * Feed-dominant "meeting HUD". Header shows agent state + an explicit End-meeting
  * button. The card feed is the hero. The footer is how you talk to the agent: a
- * persistent "Ask tellmequick…" text box plus the mic toggle. The agent surfaces
- * cards as the meeting runs and speaks only when it interjects or is addressed.
+ * persistent "Ask tellmequick…" text box. The mic is enabled on join and always
+ * listening (no toggle). The agent surfaces cards as the meeting runs and speaks
+ * only when it interjects or is addressed.
  */
 export function AgentSessionView_01({
   supportsChatInput = true,
@@ -91,15 +88,6 @@ export function AgentSessionView_01({
 
   const liveCards = useAgentCards();
   const cards = liveCards.length > 0 ? liveCards : DEMO_FEED ? SAMPLE_CARDS : [];
-
-  // The footer mic toggle only — typing is the AskInput; ending is the header button.
-  const micOnly: AgentControlBarControls = {
-    leave: false,
-    microphone: true,
-    chat: false,
-    camera: false,
-    screenShare: false,
-  };
 
   const status = stateLabel(agentState);
 
@@ -145,19 +133,10 @@ export function AgentSessionView_01({
         <CardFeed cards={cards} className="mx-auto h-full w-full max-w-2xl px-4 py-4" />
       </div>
 
-      {/* Footer: talk to the agent — type or use the mic */}
+      {/* Footer: talk to the agent — type, or just speak (mic is always on) */}
       <div className="border-border/60 border-t px-3 py-3 md:px-6">
         <div className="mx-auto flex max-w-2xl items-center gap-2">
           {supportsChatInput && <AskInput className="grow" />}
-          <AgentControlBar
-            variant="livekit"
-            controls={micOnly}
-            isChatOpen={false}
-            isConnected={session.isConnected}
-            onDisconnect={session.end}
-            onIsChatOpenChange={() => {}}
-            className="shrink-0"
-          />
         </div>
         <p className="text-muted-foreground mx-auto mt-2 max-w-2xl text-center text-[11px]">
           Type above, or just say <span className="text-foreground font-medium">“tellmequick”</span>{' '}
