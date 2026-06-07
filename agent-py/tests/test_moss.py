@@ -341,6 +341,29 @@ async def test_publish_reply_card_mirrors_spoken_answer_with_sources(stub_moss) 
     assert assistant._wm.pending_sources == []
 
 
+async def test_note_user_message_sets_query_for_reply_card(stub_moss) -> None:
+    """A typed question bypasses on_user_turn_completed, so pending_query is never set
+    that way. note_user_message (fired from conversation_item_added for the user turn)
+    captures it so the reply card still shows the question that prompted it."""
+    room = _FakeRoom()
+    assistant = Assistant(room=room, group_id=GROUP_ID)
+
+    assistant.note_user_message("tellmequick what's our cash runway?")
+    await assistant.publish_reply_card("About 18 months at the current burn.")
+
+    payload = _decoded(room.local_participant.published)
+    assert payload["data"]["query"] == "tellmequick what's our cash runway?"
+    assert payload["data"]["answer"] == "About 18 months at the current burn."
+
+
+async def test_note_user_message_ignores_blank(stub_moss) -> None:
+    """A blank/whitespace user item must not clobber an existing pending query."""
+    assistant = Assistant(room=_FakeRoom(), group_id=GROUP_ID)
+    assistant._wm.pending_query = "what did we decide?"
+    assistant.note_user_message("   ")
+    assert assistant._wm.pending_query == "what did we decide?"
+
+
 async def test_publish_reply_card_skips_empty(stub_moss) -> None:
     """An empty reply produces no card and clears the buffer."""
     room = _FakeRoom()

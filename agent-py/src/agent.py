@@ -574,6 +574,15 @@ class Assistant(Agent):
         if text and text.strip():
             self._wm.turns.append((role, text.strip()))
 
+    def note_user_message(self, text: str) -> None:
+        """Capture the user's latest question as the query paired with the next reply
+        card. Fired from conversation_item_added for the user turn, so it covers BOTH
+        spoken and typed input — typed questions skip on_user_turn_completed, so this
+        is the only hook that sees them. Blank items don't clobber an existing query."""
+        text = (text or "").strip()
+        if text:
+            self._wm.pending_query = text
+
     # ---- data-channel publishing ---------------------------------------------
 
     async def _publish(self, type_: str, data: dict) -> None:
@@ -791,11 +800,14 @@ async def my_agent(ctx: JobContext):
     @session.on("conversation_item_added")
     def _on_item(ev):
         item = ev.item
-        if (
-            isinstance(item, ChatMessage)
-            and item.role == "assistant"
-            and item.text_content
-        ):
+        if not isinstance(item, ChatMessage) or not item.text_content:
+            return
+        if item.role == "user":
+            # Pair the reply card with the question that prompted it. This is the
+            # uniform hook for BOTH spoken and typed input — typed questions reach
+            # the agent via generate_reply() and skip on_user_turn_completed.
+            assistant.note_user_message(item.text_content)
+        elif item.role == "assistant":
             task = asyncio.create_task(assistant.publish_reply_card(item.text_content))
             bg_tasks.add(task)
             task.add_done_callback(bg_tasks.discard)
