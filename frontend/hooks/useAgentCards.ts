@@ -52,21 +52,21 @@ function parse(payload: Uint8Array): AgentCard | null {
       const answer = typeof data.answer === 'string' ? data.answer : '';
       const query = typeof data.query === 'string' ? data.query : undefined;
       const sources = sourcesFromMatches(data.matches);
-      // Grounded reply with citations → context card; bare spoken line → transcription.
-      if (sources.length > 0) {
-        return {
-          id,
-          ts,
-          kind: 'context',
-          answer: answer || query || 'Relevant context',
-          query,
-          sources,
-          timeTakenMs: typeof data.time_taken_ms === 'number' ? data.time_taken_ms : null,
-          streaming,
-        };
-      }
-      if (!answer) return null;
-      return { id, ts, kind: 'transcription', answer, query, streaming };
+      // Always a context card. Sources attach late (after retrieval), so inferring
+      // the kind from their presence made streamed partials flip "Said" → "Context"
+      // mid-reply. Every reply is an interjection/answer, so render one stable kind;
+      // sources just fill in when they arrive.
+      if (!answer && sources.length === 0) return null;
+      return {
+        id,
+        ts,
+        kind: 'context',
+        answer: answer || query || 'Relevant context',
+        query,
+        sources,
+        timeTakenMs: typeof data.time_taken_ms === 'number' ? data.time_taken_ms : null,
+        streaming,
+      };
     }
     case 'decision_pending': {
       const text = typeof data.text === 'string' ? data.text : '';
