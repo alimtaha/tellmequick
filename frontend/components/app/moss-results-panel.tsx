@@ -20,7 +20,7 @@ export function MossResultsPanel({
   return (
     <div className={cn('space-y-3', className)} {...props}>
       <h3 className="text-muted-foreground text-sm font-medium tracking-wide uppercase">
-        Knowledge Matches
+        Meeting Context
       </h3>
       <div className="space-y-2">
         {events.map(({ id, query, matches, timeTakenMs }) => (
@@ -39,7 +39,7 @@ export function MossResultsPanel({
             </summary>
             <ol className="text-muted-foreground mt-2 space-y-2 text-sm">
               {matches.length === 0 ? (
-                <li className="italic">No knowledge matches found.</li>
+                <li className="italic">No matching context found.</li>
               ) : (
                 matches.map((match, index) => (
                   <li key={`${id}-${index}`} className="space-y-1">

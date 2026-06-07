@@ -19,9 +19,13 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL;
 const AGENT_NAME = process.env.AGENT_NAME;
 
 // httpOnly cookie that persists a stable per-user id across visits. Stamped into the agent
-// dispatch metadata as `{ "user_id": <uuid> }` so the agent can scope its Moss memory per user.
+// dispatch metadata alongside the group id, for attribution.
 const USER_COOKIE = 'lk_moss_user';
 const USER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+
+// The team/topic scope the agent retrieves within (Moss `group_id` filter). Single-group
+// demo for v0; override via env. Must match the group_id on the seeded Moss docs.
+const GROUP_ID = process.env.DEFAULT_GROUP_ID ?? 'acme-finance';
 
 // don't cache the results
 export const revalidate = 0;
@@ -58,13 +62,13 @@ export async function POST(req: Request) {
       ? RoomConfiguration.fromJson(body.room_config, { ignoreUnknownFields: true })
       : new RoomConfiguration();
 
-    // Stamp `{ "user_id": <uuid> }` as the agent dispatch metadata. The agent reads this via
-    // `ctx.job.metadata`. Ensure an agent dispatch entry exists (using AGENT_NAME for explicit
-    // dispatch) and preserve any agent name already supplied by the client.
+    // Stamp `{ "group_id": <scope>, "user_id": <uuid> }` as the agent dispatch metadata. The
+    // agent reads `group_id` via `ctx.job.metadata` to scope retrieval. Ensure an agent dispatch
+    // entry exists (using AGENT_NAME for explicit dispatch) and preserve any client-supplied name.
     if (roomConfig.agents.length === 0) {
       roomConfig.agents.push(new RoomAgentDispatch({ agentName: AGENT_NAME ?? '' }));
     }
-    const dispatchMetadata = JSON.stringify({ user_id: userId });
+    const dispatchMetadata = JSON.stringify({ group_id: GROUP_ID, user_id: userId });
     for (const agent of roomConfig.agents) {
       if (!agent.agentName && AGENT_NAME) {
         agent.agentName = AGENT_NAME;

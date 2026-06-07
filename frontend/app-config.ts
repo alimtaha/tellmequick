@@ -33,10 +33,10 @@ export interface AppConfig {
 }
 
 export const APP_CONFIG_DEFAULTS: AppConfig = {
-  companyName: 'Moss',
-  pageTitle: 'Moss LiveKit Docs Helper',
+  companyName: 'tellmequick',
+  pageTitle: 'tellmequick — Decision & Context Co-Pilot',
   pageDescription:
-    'A voice assistant that answers LiveKit questions from a Moss knowledge base and remembers what you tell it',
+    'A real-time copilot that surfaces relevant prior context — documents, Slack, and past decisions — live in your meeting.',
 
   supportsChatInput: true,
   supportsVideoInput: true,
@@ -47,7 +47,7 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   accent: '#002cf2',
   logoDark: '/lk-logo-dark.svg',
   accentDark: '#1fd5f9',
-  startButtonText: 'Start call',
+  startButtonText: 'Start meeting',
 
   // optional: audio visualization configuration
   // audioVisualizerType: 'bar',
