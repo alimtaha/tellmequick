@@ -2,7 +2,9 @@
 
 **Companion to:** [financial-prd-final.md](./financial-prd-final.md). The PRD covers *what* we ship and *why*; this doc covers *how* — interfaces, sequence, latency budget, failure modes, deploy topology. Assumes the PRD is read.
 
-**Scope:** v0 / 24h hackathon. Pin choices that unblock the build; flag the rest in §11.
+**Grounded in the scaffold.** This repo is based on `livekit-examples/moss-hacker-starter` (see [agent-py/AGENTS.md](./agent-py/AGENTS.md)). The design below extends the scaffold rather than replacing it — same `MossClient`, same `@function_tool` pattern, same `AgentServer` + `@server.rtc_session` wiring. Where we diverge, we say so.
+
+**Scope:** v0 / 24h hackathon. Pin choices that unblock the build; flag the rest in §12.
 
 ---
 
@@ -10,301 +12,306 @@
 
 ```mermaid
 flowchart LR
-  USR[Meeting participants<br/>browser]
-  ROOM(("LiveKit Room<br/>WebRTC"))
-  subgraph AW["LiveKit Agents worker (Python, our process)"]
-    AGT["Agent loop<br/>(STT · gate · render · publish)"]
+  USR[Meeting participants<br/>browser · Next.js frontend]
+  ROOM(("LiveKit Room<br/>WebRTC · data channel"))
+  subgraph AW["agent-py worker (Python · livekit-agents 1.5.16)"]
+    AGT["Assistant Agent<br/>(LLM + @function_tool)"]
     WM[["Working memory<br/>(in-process, ephemeral)<br/>recent turns · surfaced cards<br/>· pending decisions"]]
     AGT <--> WM
   end
-  TF["TrueFoundry<br/>LLM gateway"]
-  CORPUS[(Moss · corpus<br/>read-only at runtime<br/>seeded async)]
-  LTM[(Moss · long-term memory<br/>read at runtime<br/>appended post-convo · cloud-synced)]
-  SEED["Seed pipeline<br/>(offline, pre-demo)"]
+  INF["LiveKit Inference<br/>STT · LLM · TTS"]
+  KN[(Moss · knowledge<br/>read-only at runtime<br/>seeded offline)]
+  MEM[(Moss · memory<br/>read+write at runtime<br/>per-user filtered)]
+  SEED["Offline ingest<br/>(extends create_index.py)"]
   SLACK[Slack export]
   TR[Prior transcripts]
   DOCS[Filings / docs]
-  KPI[Metrics snapshot]
+  KPI[Metrics rows]
 
-  USR <-->|audio + data ch.| ROOM
-  AW <-->|joins as participant| ROOM
-  AGT -->|hot-path LLM call| TF
-  AGT -->|query| CORPUS
-  AGT -->|query| LTM
-  WM -.->|distill at end-of-convo| LTM
+  USR <-->|audio + moss_context data msg| ROOM
+  AW <-->|joins room as participant<br/>agent_name=agent-py| ROOM
+  AGT -->|STT · LLM · TTS| INF
+  AGT -->|query| KN
+  AGT <-->|query · add_docs| MEM
+  WM -.->|end-of-convo distillation flush| MEM
   SLACK --> SEED
   TR --> SEED
   DOCS --> SEED
   KPI --> SEED
-  SEED --> CORPUS
+  SEED --> KN
 ```
 
-One LiveKit room per meeting. Frontend = browser tab using `@livekit/components-react`. Our worker joins as a programmatic participant of kind `AGENT`. The hot path lives entirely inside that worker process.
+One LiveKit room per meeting. Frontend = Next.js + `@livekit/components-react`. The `agent-py` worker joins as a programmatic participant of kind `AGENT` (explicit dispatch via `agent_name="agent-py"`). The hot path lives entirely inside that worker. **LiveKit Inference handles STT, LLM, and TTS** — there is no separate LLM gateway (no TrueFoundry, no MiniMax). Moss runs as a managed service via `MossClient`; both indexes are pre-loaded into the worker on `Agent.on_enter` to keep the first query fast.
 
-**Three memory tiers** (detailed in §4):
-- **Corpus (Moss, read-only)** — offline-ingested Slack export, filings, prior transcripts, metrics. Built by the seed pipeline; not modified at runtime.
-- **Long-term memory (Moss, append-only at runtime)** — distilled facts/decisions/summaries from prior conversations. Read on the hot path; written *once* at end-of-conversation, then synced to Moss Cloud.
-- **Working memory (in-process, ephemeral)** — recent turns, surfaced cards (to avoid re-flashing), pending decisions in the active meeting. Dies with the session unless distilled to long-term.
-
-Both Moss indexes run in-process for hot-path reads (no network hop); the cloud sync is async.
+**Three memory tiers** (detailed in §5):
+- **`knowledge` (Moss, read-only)** — the offline-ingested document corpus: Slack export, filings, prior transcripts, metrics summary rows. Seeded by `create_index.py`; not modified at runtime.
+- **`memory` (Moss, read+write, per-user filtered)** — durable agentic memory. Written *two ways*: (a) LLM-driven via the `remember_fact` tool mid-conversation (scaffold pattern), (b) batched at end-of-conversation via a distillation flush we add (§6.3).
+- **Working memory (in-process)** — recent turns, surfaced cards (to avoid re-flashing), pending decisions in the active session. Dies with the worker unless flushed.
 
 ---
 
 ## 2. LiveKit Agents session lifecycle
 
-We use the LiveKit Agents Python framework. One worker process, dispatched per job.
+We extend the scaffold's structure in [agent-py/src/agent.py](./agent-py/src/agent.py). One worker process; one room per job; one session per room.
 
 ```
 process start
-  → register worker with LiveKit Cloud (WS, long-lived)
-  → on Job assigned:
-      entrypoint(JobContext)
-        → AgentSession(stt=Deepgram/AssemblyAI, llm=None, tts=None, vad=Silero)
-        → session.start(room, agent=FinanceCopilotAgent())
-        → session bridges room audio → STT plugin → on_user_turn_completed
-        → our agent overrides on_user_turn_completed to drive the per-utterance loop
-        → tools (memory_query, write_back) registered for optional LLM dispatch
-        → publish cards via RPC to the frontend participant
-  → on participant leave / room close → session ends, job completes
+  → AgentServer() + @server.rtc_session(agent_name="agent-py")
+  → prewarm(JobProcess): proc.userdata["vad"] = silero.VAD.load()
+  → on job dispatch (frontend supplies {"user_id": ...} in ctx.job.metadata):
+      user_id = json.loads(ctx.job.metadata).get("user_id", DEFAULT_USER_ID)
+      session = AgentSession(
+          stt = inference.STT(model="deepgram/nova-3", language="multi"),
+          tts = inference.TTS(model="cartesia/sonic-3", voice=...),
+          turn_detection = MultilingualModel(),
+          vad = ctx.proc.userdata["vad"],
+          preemptive_generation = True,
+      )
+      await session.start(
+          agent = Assistant(room=ctx.room, user_id=user_id),
+          room = ctx.room,
+          room_options = RoomOptions(
+              audio_input = AudioInputOptions(
+                  noise_cancellation = ai_coustics.audio_enhancement(QUAIL_VF_S),
+              ),
+          ),
+      )
+      await ctx.connect()
+      await session.generate_reply(instructions="Greet warmly, ...")
+      # voice loop runs; tool calls drive retrieval and memory I/O
+  → on participant leave / room close:
+      → finalize_conversation(): distillation flush → memory index (§6.3)
+      → session ends, job completes
 ```
 
-Why no LLM in `AgentSession`: we do **not** want the framework's built-in "LLM → TTS reply" loop. The agent doesn't speak; it surfaces cards. We hijack `on_user_turn_completed` to run our own gate → Moss → render path, and publish the result over RPC instead of via TTS.
+**Extension points** we use:
 
-VAD + turn detection: Silero VAD ships with the framework; we accept default end-of-turn behavior at P0. False-cut tuning is post-v0.
+| Hook | What we do |
+|---|---|
+| `prewarm` | Load Silero VAD (scaffold); also load distillation prompt template, schema |
+| `Agent.on_enter` | Preload both Moss indexes (scaffold pattern); init working memory |
+| `Agent.__init__` | Wire `MossClient`, `user_id`, `room`, `WorkingMemory` |
+| `@function_tool` methods | Retrieval + memory writes + decision capture (§4) |
+| Session-end callback | Trigger end-of-conversation distillation (§6.3) |
+
+Conversation = one LiveKit room session. We use the room's `name` as our `conversation_id`.
 
 ---
 
-## 3. Hot-path sequence (per utterance)
+## 3. Hot-path sequence (tool-call pattern)
+
+The scaffold's pattern: the LLM is the "gate". Its system prompt instructs *when* to call `search_knowledge` / `recall_facts` before answering. We don't write a custom retrievable-question gate — the LLM does it via instructions, which is sufficient for the demo's hero moment (the LLM will call `search_knowledge` on any reference to prior context).
 
 ```mermaid
 sequenceDiagram
   participant U as User (browser)
   participant R as LiveKit room
-  participant A as Agent worker
+  participant S as AgentSession
+  participant A as Assistant (LLM + tools)
   participant W as Working memory (in-proc)
-  participant T as TrueFoundry / LLM
-  participant C as Moss · corpus
-  participant L as Moss · long-term
+  participant K as Moss · knowledge
+  participant M as Moss · memory
+  participant I as LiveKit Inference
 
   U->>R: audio frames
-  R->>A: subscribed audio track
-  A->>A: STT stream → final segment (~300-700ms after EoT)
-  A->>W: append turn (always, sync)
-  A->>T: gate call {utterance, recent_turns} → {retrievable, query, scope}
-  Note over A,T: ~200-400ms, fast model (MiniMax HighSpeed)
-  alt retrievable
+  R->>S: subscribed track
+  S->>I: STT stream (deepgram/nova-3)
+  I-->>S: final segment (~200-400ms)
+  S->>A: on_user_turn_completed(segment)
+  A->>W: append turn (sync, ephemeral)
+  S->>I: LLM call (openai/gpt-5.2-chat-latest)<br/>tools = [search_knowledge, recall_facts, remember_fact, mark_decision]
+  Note over S,I: preemptive_generation begins during EoT detection
+  alt LLM emits tool calls
     par parallel
-      A->>C: query(query, scope) → hits
-      A->>L: query(query, scope) → hits
+      A->>K: query(query, top_k=3)
+      A->>M: query(query, top_k=5, filter={user_id})
     end
-    C-->>A: top-k (<10ms)
-    L-->>A: top-k (<10ms)
-    A->>W: filter — drop hits matching cards already surfaced this session
-    A->>A: merge + rerank
-    alt structured records exist
-      A->>A: template render (no LLM)
-    else only unstructured chunks
-      A->>T: synth call {chunks, utterance} → card body
-      T-->>A: ~300-600ms
-    end
-    A->>R: RPC publish card
-    A->>W: record surfaced card
-    R->>U: card on screen
-  else not retrievable
-    A->>A: drop (no card)
+    K-->>A: SearchResult
+    M-->>A: SearchResult
+    A->>W: filter — drop docs already surfaced this session
+    A->>R: publish_data(moss_context, reliable=True)
+    R->>U: card appears in context panel
+    A-->>S: tool results joined as plain text
+    S->>I: LLM continuation (synthesizes spoken reply from tool results)
   end
-  Note over A,L: NO per-turn write to long-term. Long-term flush happens once, at end-of-conversation (§6).
+  I-->>S: streamed reply tokens
+  S->>I: TTS stream (cartesia/sonic-3)
+  I-->>R: audio frames
+  R->>U: agent speaks (perceived ~500-900ms after EoT)
+  Note over A,M: NO mid-turn write to memory unless LLM calls remember_fact.<br/>End-of-convo distillation flush handles batched persistence (§6.3).
 ```
 
-### Latency budget (target p95, structured-record path)
+### Latency budget (target p95, "voice + card" path)
 
 | Stage | Budget | Notes |
 |---|---|---|
-| STT finalization | 300–700ms | Provider-dependent; AssemblyAI universal-streaming or Deepgram nova-3 |
-| Gate LLM call | 200–400ms | One structured JSON output, fast model via TrueFoundry US endpoint |
-| Moss queries (parallel: corpus + long-term) | <10ms | Both in-process; bound by the slower index, not the sum |
-| Working-memory filter + merge/rerank | <5ms | Plain Python over small lists |
-| Template render | <5ms | No LLM |
-| RPC publish + render | 50–150ms | LiveKit data channel + React paint |
-| **End-to-end** | **<1.5s** | PRD target was <1s; realistic p95 with structured path is ~900ms–1.4s |
+| STT finalization | 200–400ms | `deepgram/nova-3` multilingual; preemptive_generation can hide some of this |
+| LLM first token | 300–600ms | `openai/gpt-5.2-chat-latest` via Inference; preemptive overlap helps |
+| Tool round-trip (both indexes parallel) | 50–150ms | Moss SaaS; bound by the slower index, not the sum |
+| Working-memory filter | <5ms | Plain Python over a small list |
+| `moss_context` publish | 20–60ms | Reliable data channel; frontend hook renders on receipt |
+| LLM synthesis continuation | 200–500ms | Tool results joined; LLM continues to spoken reply |
+| TTS first audio | 150–300ms | `cartesia/sonic-3` streams from first token |
+| **End-to-end (perceived first speech)** | **~1.0–2.0s** | Tighter on no-tool turns (skip the tool round-trip + continuation) |
+| **End-to-end (card on screen)** | **~0.7–1.2s** | Card publishes immediately after the tool call returns, before TTS finishes |
 
-Unstructured path adds 300–600ms for the synthesis call. We accept this and prefer structured templates wherever the doc shape allows.
+Card-on-screen is faster than first-speech because we publish `moss_context` as soon as the tool returns; the LLM is still synthesizing. This matches the PRD's "card lands before the next sentence" target.
 
 ---
 
-## 4. Memory layer — three tiers, distinct lifecycles
+## 4. Function tools — the agent's surface area
 
-The system has three separate memory stores. They differ in *what they hold*, *when they're written*, and *who writes them*. Collapsing them into one index is the wrong abstraction — their write semantics are incompatible (read-only vs append-only vs ephemeral).
+We extend the scaffold's three tools (`search_knowledge`, `remember_fact`, `recall_facts`) with two more for the financial-meeting use case. All five live on `Assistant` in `agent-py/src/agent.py`.
 
-| Tier | Store | Lifecycle | Writer | Reader on hot path? |
+| Tool | Index | Writes? | Publishes `moss_context`? | Purpose |
 |---|---|---|---|---|
-| **Corpus** | Moss index `corpus` (in-proc + Cloud) | Built once per company, async/offline | Seed pipeline | **Yes** |
-| **Long-term memory** | Moss index `ltm` (in-proc + Cloud-synced) | Append-only across conversations; written once at end-of-convo | Agent (end-of-convo flush) | **Yes** |
-| **Working memory** | In-process Python state (dataclass / dict) | Ephemeral — lives and dies with the AgentSession | Agent (every turn) | **Yes** (consulted, not queried) |
+| `search_knowledge(query)` | `knowledge` | No | Yes | RAG over the offline corpus (Slack, filings, prior transcripts, metrics) |
+| `recall_facts(query)` | `memory` | No | Yes | Per-user recall, filtered by `user_id` metadata |
+| `remember_fact(fact)` | `memory` | Yes | No | LLM-driven mid-conversation persistence |
+| `mark_decision(text, owner?)` | working memory | No (in-proc) | Yes (banner) | User-flagged decision; promoted to `memory` at end-of-convo |
+| `clarify_source(doc_id)` | `knowledge` or `memory` | No | Yes | Surface the full source for an already-cited card (for "what was the exact wording?") |
 
-### 4.1 Corpus index (offline-ingested document corpora)
+**System-prompt gating** (extends the scaffold's `instructions`): the LLM is told to call `search_knowledge` for *any* reference to prior discussion or to specific Slack threads / filings / metrics. False positives are inexpensive — the worst case is a silent extra Moss query. False negatives are the demo-breaking case, so the prompt skews aggressive.
 
-The historical record: Slack export, prior meeting transcripts (uploaded Zoom), parsed filings, metrics summary rows. Read-only at runtime — the agent never writes here. Built async by the seed pipeline (`/ingest`) before the demo.
+**`moss_context` payload contract** (frozen by `useMossContextEvents.ts`):
 
-**Doc shape** is the normalized schema from the PRD. Enforcement:
-- **`id` is stable and deterministic** — `{source}:{native_id}[:{chunk_n}]`. Re-ingesting the same Slack message produces the same id; seed re-runs don't dup.
-- **`group_id`** scopes to a company/topic. Every runtime query carries it.
-- **`source`** ∈ `slack | transcript | filing | metric | doc`.
-- **`timestamp`** is ISO-8601 UTC.
+```jsonc
+{
+  "type": "moss_context",
+  "data": {
+    "query": "<the search string>",
+    "matches": [
+      { "text": "...", "score": 0.92, "metadata": {"source": "slack", "url": "..."} }
+    ],
+    "time_taken_ms": 8.3,
+    "timestamp": 1717628400.512    // epoch SECONDS; frontend multiplies by 1000
+  }
+}
+```
 
-To refresh the corpus (new Slack export, additional filings): re-run `/ingest`. Not on the hot path.
+`mark_decision` publishes a sibling type (e.g. `decision_pending`) on the same data channel so the frontend can render a different banner. Same publish path (`room.local_participant.publish_data(..., reliable=True)`), different `type` discriminator.
 
-### 4.2 Long-term memory index (agentic, cross-conversation)
+---
 
-What the agent has *learned* from prior conversations: distilled decisions, key facts surfaced, recurring concerns, who-owns-what. Grows monotonically as more meetings happen.
+## 5. Memory layer — three tiers, distinct lifecycles
 
-- **Source field**: `source = "ltm"`. Keeps it distinguishable from corpus docs in merged results.
-- **Doc id**: `ltm:{conversation_id}:{turn_or_summary_n}`. Idempotent re-flush is safe.
-- **`is_decision`** flag is meaningful here — decisions surface with a score boost in §3's rerank.
-- **`meta.distilled_from`** carries the conversation id and source turn ids for audit/citation.
+### 5.1 `knowledge` index (offline corpus)
 
-**Why a separate index, not just a `source=ltm` filter on corpus**: lifecycle. Corpus is read-only and refreshed by re-ingest; LTM is append-only and grown by the agent. Different writers, different schemas allowed, different retention policies later. Keeping them separate makes the contract clean — and parallel querying costs nothing in-process.
+Read-only at runtime. Seeded once per company by an extended `create_index.py`. For v0 the corpus mixes our four sources into one index — keeping it as one index matches the scaffold and lets a single `search_knowledge` call surface from all of them.
 
-### 4.3 Working memory (in-process, ephemeral)
+**Doc shape** — uses Moss's `DocumentInfo(id, text, metadata)`. Constraints:
+- **Moss metadata values are strings only.** Booleans and timestamps must be stringified — `create_index.py` does this with `{str(k): str(v) for ...}`. This kills the PRD's `is_decision: true` (it becomes `"is_decision": "true"`).
+- **`id` is stable and deterministic** — `{source}:{native_id}[:{chunk_n}]` — so re-running ingest is idempotent.
+- **`metadata.source`** ∈ `slack | transcript | filing | metric | doc` — the agent doesn't filter on it, but the frontend uses it to label cards.
 
-The agent's awareness of the *current* conversation. Lives in the AgentSession's Python state — not in Moss.
+`knowledge.json` (the scaffold's seed file) becomes our combined corpus seed. Adding sources = adding entries to this file before running `create_index.py`.
+
+### 5.2 `memory` index (durable, per-user, dual-write)
+
+Read+write at runtime, scoped by `metadata.user_id`. Written in **two ways**:
+
+1. **LLM-driven (scaffold pattern)** — the LLM calls `remember_fact(fact)` mid-conversation when the user shares something durable. `Assistant.remember_fact` builds a `DocumentInfo` with `metadata={"user_id": <id>}` and calls `await self._moss.add_docs(MEMORY_INDEX, [doc])`, then reloads the index so `recall_facts` can find it on the next turn. Doc ids are `{user_id}-{uuid4()}`.
+2. **End-of-conversation distillation flush (we add)** — at session end, working memory's `turns` + `pending_decisions` are passed to a `distill(...)` call that produces 1 summary doc + N decision docs. Batched `add_docs` to `memory`. Doc ids are `{user_id}-ltm-{conversation_id}-{n}` so re-flushes are idempotent.
+
+Both write paths land in the *same* index, distinguished by metadata (`source: "ltm" | "remember_fact"`). Recall queries don't filter on source — recency and score do the work — but the metadata is there for audit.
+
+**Query filter (scaffold idiom):**
 
 ```python
-# /agent/working_memory.py
+QueryOptions(top_k=5, filter={"field": "user_id", "condition": {"$eq": self._user_id}})
+```
+
+### 5.3 Working memory (in-process)
+
+The agent's awareness of the current conversation. Lives in `Assistant`'s Python state; not in Moss.
+
+```python
 @dataclass
 class WorkingMemory:
-    conversation_id: str
-    group_id: str
-    turns: deque[Turn]                       # bounded ring buffer (e.g. last 50 turns)
-    surfaced_cards: list[SurfacedCard]       # cards already shown this session
-    pending_decisions: list[PendingDecision] # user-flagged but not yet confirmed
+    conversation_id: str          # = ctx.room.name
+    user_id: str
+    turns: deque[Turn]            # bounded (~50, ring buffer)
+    surfaced_cards: list[Card]    # for dedup (don't flash the same Slack thread twice)
+    pending_decisions: list[Decision]  # populated by mark_decision tool
     started_at: datetime
 ```
 
 Three roles on the hot path:
-1. **Recent-turn context** — passed into the gate prompt as `recent_context` so the gate can disambiguate ("this" / "that").
-2. **De-duplication** — after Moss queries return hits, drop anything whose doc id matches an already-surfaced card. Prevents the same Slack thread flashing twice in one meeting.
-3. **Decision capture** — when the user clicks "mark as decision" on a card, record it here. It's promoted to long-term at end-of-convo.
+1. **Dedup** — after `search_knowledge` returns, drop docs whose ids already appear in `surfaced_cards`. Prevents the same source flashing twice.
+2. **Decision capture** — `mark_decision` appends here; nothing hits Moss yet.
+3. **Context for distillation** — `turns` + `pending_decisions` are the input to the end-of-convo distill call.
 
-Working memory is not durable. If the worker crashes mid-meeting, the conversation's working state is lost — that's acceptable for v0 (re-joining the room resumes with empty working memory; corpus + LTM are still queryable). Persistence (SQLite snapshot per N turns) is a P2.
+Working memory is **not durable**. If the worker crashes mid-meeting, the active session's state is lost. Corpus + memory are unaffected (durable in Moss). P2: periodic SQLite snapshot.
 
-### 4.4 Query interface (one wrapper, two indexes)
+### 5.4 Wrapper over `MossClient`
 
-```python
-# /memory/moss.py
-class Memory:
-    def __init__(self, corpus_index: str, ltm_index: str): ...
-
-    def add_corpus_docs(self, docs: list[Doc]) -> None: ...    # seed time only
-    def append_ltm(self, docs: list[Doc]) -> None: ...         # end-of-convo only
-
-    def query_all(
-        self,
-        text: str,
-        group_id: str,
-        *,
-        sources: list[str] | None = None,
-        user_id: str | None = None,
-        top_k_per_index: int = 8,
-        alpha: float = 0.5,
-    ) -> list[Hit]:
-        """Fire both indexes in parallel, return merged + rescored hits.
-        Each Hit carries `tier ∈ {corpus, ltm}` so the agent can weight or label."""
-```
-
-The agent calls `query_all` once per retrievable utterance; the wrapper hides the two-index detail. Rerank applies a small recency boost (LTM hits from today's predecessor meetings beat 6-month-old ones) and a small `is_decision` boost.
+Optional thin wrapper to centralize the `user_id` filter and dual-index pre-load — but the scaffold's pattern of calling `MossClient` directly inside each `@function_tool` works fine and keeps tests simple (the existing `_FakeMossClient` in [agent-py/tests/test_moss.py](./agent-py/tests/test_moss.py) covers it).
 
 ---
 
-## 5. The retrievable-question gate
-
-The single most demo-fragile component. PRD calls out false positives as a top-3 risk.
-
-### Call shape
-
-```jsonc
-// Input: last STT segment + last ~3 turns of context
-{
-  "utterance": "didn't we go back and forth on this in slack?",
-  "recent_context": ["...", "...", "..."]
-}
-
-// Output (structured, validated):
-{
-  "retrievable": true,
-  "query": "budget cut debate slack thread",
-  "scope": {
-    "sources": ["slack"],            // optional
-    "user_id": null                  // optional
-  },
-  "confidence": 0.82                 // for empty-state fallback
-}
-```
-
-Model + routing: fast-tier model (MiniMax HighSpeed via TrueFoundry, US endpoint). One call, JSON schema enforced server-side via TrueFoundry's structured-output passthrough or a Pydantic validator + retry on parse fail.
-
-### Tuning posture
-
-- **Default deny.** If the gate returns `retrievable=false` *or* confidence < 0.6, drop. Better to miss than to flash a wrong card.
-- **Eval-driven.** The 15-question fixture set in `/eval` doubles as the gate tuning set — precision matters more than recall.
-- **Negative examples in the prompt** — small-talk, navigation ("next slide"), affirmations. These must return `false`.
-
-### Why not skip the gate and always query Moss?
-
-Querying is cheap, but *rendering a card* isn't. The cost of a false card on a live demo is the entire pitch. The gate is what keeps the surface quiet.
-
----
-
-## 6. Write paths — two phases, no per-turn writes to Moss
-
-The system writes in two phases. Per-turn writes go to **working memory only** (in-process, sync, cheap). The Moss LTM index is written **once**, at end-of-conversation, after a distillation pass. This avoids polluting LTM with raw per-turn chatter and prevents the self-citation pathology.
+## 6. Write paths — three phases
 
 ### 6.1 Per-turn → working memory (sync, in-process)
 
-```python
-on_user_turn_completed(final_segment):
-    working_memory.turns.append(Turn(
-        seq=next_seq(),
-        speaker=final_segment.participant,
-        text=final_segment.text,
-        confidence=final_segment.confidence,
-        timestamp=now_iso(),
-    ))
-    # No Moss write here. No I/O.
-```
+Every STT-finalized turn is appended to `working_memory.turns` synchronously. No Moss I/O, no async. Used by the dedup and distillation paths.
 
-Sync because it's a deque append. No async risk, no ordering questions, no self-citation: turns aren't searchable in Moss yet.
+### 6.2 Per LLM tool call → memory (sync, scaffold)
 
-### 6.2 End-of-conversation → LTM flush (one batched write)
+When the LLM calls `remember_fact`, `Assistant.remember_fact` writes to the `memory` index immediately via `await self._moss.add_docs(MEMORY_INDEX, [doc])`, then `await self._moss.load_index(MEMORY_INDEX)` so the new fact is queryable on the next turn (per scaffold comment). One-write-per-tool-call; no batching.
 
-Triggered when the room closes (last non-agent participant leaves) or the user explicitly ends the meeting. Runs as the final step of the LiveKit job lifecycle.
+`mark_decision` does NOT write to Moss — it only mutates working memory. Decisions are persisted at end-of-convo so they get the cleaner doc id and survive iteration during the meeting.
+
+### 6.3 End-of-conversation → memory (batched distillation)
+
+Triggered when the room closes (last non-agent participant leaves) or the user clicks "end meeting" in the frontend. Runs as the final step of the session.
 
 ```
 on_session_end(working_memory):
-    # 1. Distill — one LLM call (slower tier OK; we're off the hot path)
-    summary_doc = distill(working_memory.turns)
-        # → key facts, decisions made, action owners, follow-ups
-    decision_docs = [
-        Doc(id=f"ltm:{conv_id}:decision:{i}",
-            text=d.text, source="ltm", is_decision=True,
-            group_id=group_id, user_id=d.owner,
-            timestamp=d.ts, url=f"livekit://{conv_id}#t={d.turn_seq}",
-            meta={"distilled_from": d.turn_seq, "conversation_id": conv_id})
-        for i, d in enumerate(working_memory.pending_decisions)
+    # 1. Distill — one LLM call via inference.LLM (off the hot path)
+    summary = await distill_summary(working_memory.turns)
+        # → key facts, themes, follow-ups
+
+    # 2. Build batched docs
+    docs = [
+        DocumentInfo(
+            id=f"{user_id}-ltm-{conv_id}-summary",
+            text=summary.text,
+            metadata={
+                "user_id": user_id,
+                "source": "ltm",
+                "conversation_id": conv_id,
+                "kind": "summary",
+                "timestamp": now_iso_string(),
+            },
+        ),
+        *[
+            DocumentInfo(
+                id=f"{user_id}-ltm-{conv_id}-decision-{i}",
+                text=d.text,
+                metadata={
+                    "user_id": user_id,
+                    "source": "ltm",
+                    "conversation_id": conv_id,
+                    "kind": "decision",
+                    "owner": d.owner or "",
+                    "timestamp": d.ts_iso,
+                    "is_decision": "true",
+                },
+            )
+            for i, d in enumerate(working_memory.pending_decisions)
+        ],
     ]
 
-    # 2. Append to LTM index — single batched call, retried with backoff
-    memory.append_ltm([summary_doc, *decision_docs])
+    # 3. Append + reload
+    await self._moss.add_docs(MEMORY_INDEX, docs)
+    await self._moss.load_index(MEMORY_INDEX)
 
-    # 3. Sync to Moss Cloud — fire-and-forget if not already auto-synced
+    # 4. On failure: 3x retry with backoff, then JSONL crash dump
 ```
 
-- **Idempotent.** `conv_id` is stable for the meeting; re-running the flush (debug) overwrites in place.
-- **What we don't write to LTM:** raw turns. Too noisy, retrieval-toxic. Raw transcript can be persisted separately into the corpus archive if the team wants it for future reference — that's a corpus-pipeline concern, not the agent's job.
-- **Failure of the flush:** retry up to 3× with backoff before the worker exits. If all retries fail, working memory is dumped to a local JSONL crash file so the conversation isn't lost permanently — a tiny `/ops/replay-flush.py` script can re-flush from disk.
-- **Manual decision tagging during the meeting** still works: the frontend "mark as decision" button mutates `working_memory.pending_decisions`. The flush picks it up.
-
-Ordering with the corpus: corpus is never written to at runtime, so there's no cross-tier ordering issue.
+- **Idempotent** — deterministic ids keyed on `conv_id`. Re-running flush overwrites.
+- **What we don't write:** raw turns. Too noisy. Raw transcript can be persisted to `knowledge` as a separate corpus-pipeline step if you want it for future RAG.
+- **All values stringified** to satisfy Moss's metadata constraint.
 
 ---
 
@@ -312,16 +319,17 @@ Ordering with the corpus: corpus is never written to at runtime, so there's no c
 
 | Mode | Symptom | Fallback |
 |---|---|---|
-| STT stalls / no final segment | No turn fires; no card | Tune VAD; force a finalize on 1.5s silence. Demo: never the bottleneck on seeded scenario. |
-| Gate false positive (card on small talk) | Wrong card flashes | Conservative threshold; eval set as regression suite; **dismiss-card** RPC from frontend logs and feeds the prompt's negative examples. |
-| Gate false negative on hero question | The hero moment misses | Hero questions are scripted; eval covers them. If it still misses live, gate prompt has a "if the utterance references prior discussion / decision / data point → `retrievable=true`" rule baked in. |
-| Moss returns nothing / low score | Empty card | Render explicit "no strong match in memory" state — never bluff. (P1 in PRD; treat as P0-for-demo since it prevents the worst failure: a confident wrong answer.) |
-| LLM gate call times out (>800ms) | Drop the turn | Hard timeout in the agent; no card. Log; keep moving. |
-| Synth call times out | Show only the citation + first 200 chars of the top hit | Better degraded card than no card, since we know it was retrievable. |
-| TrueFoundry routing failure | Gate / synth fails | Direct fallback to MiniMax API key. Pre-configured before demo. |
-| Worker crashes mid-meeting | Cards stop; working memory lost | Worker auto-restart from LiveKit Cloud dispatch. Corpus + LTM unaffected (durable in Moss/Cloud); the active meeting's working state is gone — re-joins start with empty turns/surfaced-cards. P2 mitigation: periodic working-memory snapshot to a local SQLite. |
-| End-of-convo LTM flush fails | Conversation's learnings not persisted | 3× retry with backoff. On final failure, dump `working_memory` to a JSONL crash file; `/ops/replay-flush.py` re-runs the flush against Moss when next available. |
-| Moss Cloud unreachable | In-process indexes unaffected; LTM cloud sync stalls | Reads are local; sync is async, defers until reconnect. End-of-convo flush still writes locally and queues the cloud push. |
+| STT stalls / no final segment | No turn fires; no card; no reply | `MultilingualModel` turn detector + Silero VAD usually cover this. Hard 1.5s silence forces finalization. |
+| LLM doesn't call `search_knowledge` when it should | Hero moment misses — bluffed answer | System prompt explicitly says: "for ANY question about prior discussion / specific docs, ALWAYS call `search_knowledge` BEFORE you answer". Eval set regression-tests this. |
+| LLM calls `search_knowledge` and gets nothing | Empty card | Tool returns "No relevant documentation was found for that question." The LLM, per instructions, says so honestly rather than guessing. |
+| `recall_facts` returns nothing | LLM falls back to "I don't have anything remembered for you yet." | Scaffold default. Acceptable. |
+| LiveKit Inference LLM timeout | Voice loop stalls | Bound by AgentSession defaults; surfaces as no reply. Demo posture: run a small canary query at startup to catch a degraded endpoint. |
+| TTS error | No audio; card still publishes | Frontend's voice indicator goes idle but the context panel still updates — degraded but not silent. |
+| Moss query error | Tool returns a graceful "couldn't search right now" string | Already handled by the existing `try/except` wrapping `_publish_moss_context` in the scaffold; extend to the query call itself. |
+| Worker crashes mid-meeting | Cards stop; voice stops; working memory lost | Worker auto-restart via LiveKit Cloud dispatch. `knowledge` + `memory` durable in Moss. Active conversation's working state and pending decisions are lost — re-joins start empty. P2: periodic working-memory SQLite snapshot. |
+| End-of-convo distillation flush fails | Conversation's learnings not persisted | 3× retry with backoff. On final failure, dump `working_memory` to `/tmp/lkflush-{conv_id}.jsonl`; a `tools/replay_flush.py` script re-runs against Moss when available. |
+| Moss SaaS unreachable | Reads + writes both fail | Tools return graceful strings; conversation continues without retrieval. End-of-convo flush queues to local crash file. |
+| `remember_fact` writes a duplicate / contradictory fact | `recall_facts` returns conflicting facts | Accept for v0. P1: dedup/merge pass in the distillation flush. |
 
 ---
 
@@ -330,67 +338,89 @@ Ordering with the corpus: corpus is never written to at runtime, so there's no c
 v0:
 
 ```
-Browser (Vercel-hosted Next.js)
-  ↕ LiveKit Cloud (managed SFU + dispatch)
-  ↕ Agent worker (single Python process)
-       — local laptop or one small Render/Fly box
-       — env: LIVEKIT_URL, LIVEKIT_API_KEY/SECRET,
-              TRUEFOUNDRY_GATEWAY_URL, MINIMAX_API_KEY (fallback),
-              MOSS_API_KEY (Cloud sync)
-       — Moss runs in-process; cloud sync optional during demo
+Browser (Vercel-hosted Next.js — frontend/)
+  ↕ LiveKit Cloud (managed SFU + agent dispatch)
+       — dispatches to agent_name="agent-py"
+  ↕ agent-py worker (single Python process)
+       — local laptop OR LiveKit Cloud (Dockerfile included in agent-py/)
+       — uv run python src/agent.py {console|dev|start}
+       — env (agent-py/.env.local):
+           LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+           MOSS_PROJECT_ID, MOSS_PROJECT_KEY
+           MOSS_INDEX_NAME=knowledge, MOSS_MEMORY_INDEX_NAME=memory
+           MOSS_MODEL_ID=moss-minilm
+  ↕ Moss SaaS (managed; both indexes live here)
+  ↕ LiveKit Inference (managed; STT/LLM/TTS)
 ```
 
-One worker, one room, one company. No load balancing, no multi-tenant. Frontend authenticates anonymously to LiveKit with a short-lived token issued by a tiny `/api/token` endpoint (FastAPI, same Python process or a separate Vercel route).
+**Demo posture:** run the worker on the demo laptop in `dev` mode. Removes a network hop and any cold-start risk. Acceptable because we control the room and audience.
 
-Demo posture: **run the worker on the demo laptop** to remove a network hop and any cold-start risk. Acceptable because we control the room and audience size.
+**Multi-user identity:** the frontend dispatches with `{"user_id": <browser-stable id>}` in agent metadata. The worker parses this in `ctx.job.metadata` before `ctx.connect()` so the `memory` index filter is correct from turn 1.
 
 ---
 
-## 9. Tech stack (pinned where it matters)
+## 9. Tech stack (pinned to scaffold)
 
-| Layer | Choice | Note |
+| Layer | Choice | Source of truth |
 |---|---|---|
-| Agent runtime | `livekit-agents` (Python, latest stable) | Worker + AgentSession |
-| STT | AssemblyAI universal-streaming OR Deepgram nova-3 | Pick the one with lower observed p95 in hour 0 |
-| VAD / turn | Silero VAD via `livekit-plugins-silero` | Default thresholds |
-| LLM gateway | TrueFoundry | Structured-output passthrough preferred |
-| Hot-path model | MiniMax HighSpeed (or equivalent fast tier) | US/global endpoint |
-| Memory | Moss SDK, `moss-minilm` embedding | In-process, Cloud sync |
-| PDF parsing | Unsiloed | Only for filings; offline at seed time |
-| Backend | FastAPI (tiny — token issuance, RPC bridge if needed) | Same Python venv as the agent |
-| Frontend | Next.js + `@livekit/components-react` | Vercel deploy |
-| Eval | `pytest` + a JSON fixture set in `/eval` | Latency + precision@k |
+| Agent runtime | `livekit-agents[silero,turn-detector]==1.5.16` | `agent-py/pyproject.toml` |
+| Inference | LiveKit Inference (STT/LLM/TTS) | `agent-py/src/agent.py` |
+| STT | `deepgram/nova-3` (multilingual) | as above |
+| LLM | `openai/gpt-5.2-chat-latest` | as above |
+| TTS | `cartesia/sonic-3` | as above |
+| Turn detector | `MultilingualModel()` (livekit-plugins-turn-detector) | as above |
+| VAD | Silero (preloaded in `prewarm`) | as above |
+| Noise cancellation | `livekit-plugins-ai-coustics~=0.2`, model `QUAIL_VF_S` | `pyproject.toml` |
+| Memory | `moss>=1.4`, embedding `moss-minilm` | `pyproject.toml`, `.env.example` |
+| Package manager | `uv` | AGENTS.md |
+| Lint | `ruff` (`uv run ruff format/check`) | AGENTS.md |
+| Tests | `pytest` + `pytest-asyncio` (asyncio_mode="auto") | `pyproject.toml` |
+| Frontend | Next.js + `@livekit/components-react` | `frontend/` |
+| Container | Provided `Dockerfile` (production-ready) | `agent-py/Dockerfile` |
 
-Single Python virtualenv, single Node project for the web. No Docker for v0.
-
----
-
-## 10. Cross-cutting concerns (deliberately deferred)
-
-- **Auth / multi-tenant** — not in v0.
-- **Observability** — TrueFoundry's panel for LLM cost + latency. Worker logs via stdlib logging to stdout; tail in a terminal during the demo. No tracing infra.
-- **Secret management** — `.env`, not committed. Demo machine only.
-- **Data retention** — none; everything wiped post-demo.
+Adding a new package = `uv add <pkg>` in `agent-py/`.
 
 ---
 
-## 11. Open technical questions (hour-0 spikes)
+## 10. Testing posture (AGENTS.md mandate)
 
-1. **STT provider choice.** Run AssemblyAI vs. Deepgram on a 60s seeded clip; pick by p95 final-segment latency. ETA 30 min.
-2. **TrueFoundry structured output.** Confirm it accepts a JSON schema and rejects unparseable replies (vs. needing client-side Pydantic + retry). 30 min.
-3. **Moss embedding recall on the eval set.** Resolved in PRD — confirm in hour 0 with `moss-minilm`; `moss-mediumlm` fallback. 30 min.
-4. **Frontend ↔ agent RPC vs. data channel.** RPC for card publishes (typed, request/response), data channel reserved for "dismiss card" feedback. Confirm RPC payload size limits. 15 min.
-5. **Hero question phrasing in the eval set.** The exact wording of the demo's hero utterance must be in the gate's positive examples; verify by running the gate against the recorded script before the run-through. 15 min.
-6. **Write-back race — resolved by design.** Per-turn writes only hit working memory, not Moss; self-citation is structurally impossible.
-7. **Distillation prompt for LTM flush.** What does `distill(turns)` actually return? First cut: one summary doc + one decision doc per `pending_decisions` entry. Spike: run on 2–3 seeded transcripts and eyeball whether the resulting LTM hits are useful when replayed against the gate's eval set. 45 min.
-8. **LTM dedup across re-flushed conversations.** Stable `conv_id` handles same-meeting replays, but two meetings discussing the same topic will produce overlapping facts. v0: accept duplication, rely on Moss's hybrid scoring to surface the freshest one. Spike: confirm reranker actually picks the newer one when ties happen. 20 min.
-9. **Working-memory bound size.** `turns` is a deque — what's the cap before recent-context truncation hurts the gate? Educated guess: 50 turns ≈ 5–10 min of meeting. Validate on a seeded transcript. 15 min.
-10. **LTM retention / privacy.** Out of scope for v0 (single demo company, throwaway data), but the LTM index will need a deletion path (per-user GDPR, per-conversation forget) before any pilot. Flag, don't build.
+AGENTS.md is explicit: when modifying core behavior (instructions, tool descriptions, workflows), **always TDD**. The existing test patterns to follow:
+
+- **`agent-py/tests/test_moss.py`** — unit tests for `@function_tool` methods, with `_FakeMossClient` (records calls, no network). Pattern: monkeypatch `agent_module.MossClient` to the fake, instantiate `Assistant`, set `assistant._moss.query_result = _FakeSearchResult([...])`, call the tool, assert on the index name, query, filter, and the published `moss_context` payload.
+- **`agent-py/tests/test_agent.py`** — LLM-judged evals for end-to-end behavior.
+
+New tools (`mark_decision`, `clarify_source`) get unit tests in `test_moss.py`-style. The distillation flush gets its own test with a deterministic stub LLM.
 
 ---
 
-## 12. Cross-references
+## 11. Cross-cutting concerns (deferred)
 
-- Scope, non-goals, success criteria: [PRD](./financial-prd-final.md)
-- Repo layout: [PRD §Suggested repo scaffold](./financial-prd-final.md)
-- Demo scenario + hero moment: [PRD §Demo scenario](./financial-prd-final.md)
+- **Auth / multi-tenant** — not in v0; single demo company, frontend supplies `user_id`.
+- **Observability** — LiveKit Agent Observability is built in (see scaffold README); also `uv run` writes stdlib logs to stdout. No external tracing in v0.
+- **Secret management** — `.env.local`, not committed. Demo machine only.
+- **Data retention** — none; everything wiped post-demo. Moss indexes can be dropped manually.
+- **Workflows / handoffs / tasks** (AGENTS.md highlights these) — not used in v0; a single `Assistant` covers the demo. Worth considering for v1 if we add multi-phase flows (e.g. "now summarize" vs. "now find context").
+
+---
+
+## 12. Open technical questions (hour-0 spikes)
+
+1. **`knowledge.json` shape for our corpus.** Extend the scaffold's `knowledge.json` to ingest Slack export + filings + prior transcripts + metrics. Verify chunk size and metadata-string coercion don't break recall on the eval set. 45 min.
+2. **System-prompt gating efficacy.** The LLM-as-gate works only if the prompt is right. Run the 15 fixture questions against the scaffold's `Assistant` (with our extended instructions) and confirm `search_knowledge` fires for each. If not, tune the instructions. 30 min.
+3. **Distillation prompt.** First cut: 1 summary + N decision docs. Spike: run on 2–3 seeded transcripts, eyeball whether `recall_facts` later surfaces useful results. 45 min.
+4. **`mark_decision` UX.** Frontend needs a button. Wire the data-channel publish (`type: "decision_pending"`) end-to-end. 30 min.
+5. **`add_docs` + `load_index` cost on the hot path.** Scaffold reloads `memory` after every `remember_fact`. Measure latency. If >300ms, consider lazy-reload or move it off the critical path. 20 min.
+6. **Dedup across re-flushes.** Stable doc ids handle same-meeting replays. Two meetings with overlapping topics will dup — accept for v0; let scoring surface the freshest. 15 min.
+7. **Moss metadata string coercion.** Confirm `create_index.py`'s pattern still works for all our metadata fields (especially timestamps, owners with apostrophes). 15 min.
+8. **Per-user retention/privacy** — out of scope for v0; flag for any pilot. Need a `forget(user_id, conversation_id?)` path before deployment.
+
+---
+
+## 13. Cross-references
+
+- Scope, non-goals, success criteria: [financial-prd-final.md](./financial-prd-final.md)
+- Scaffold conventions: [agent-py/AGENTS.md](./agent-py/AGENTS.md)
+- Agent code: [agent-py/src/agent.py](./agent-py/src/agent.py)
+- Index seeding: [agent-py/src/create_index.py](./agent-py/src/create_index.py)
+- Tool test pattern: [agent-py/tests/test_moss.py](./agent-py/tests/test_moss.py)
+- Environment: [agent-py/.env.example](./agent-py/.env.example)
