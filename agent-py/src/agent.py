@@ -289,6 +289,8 @@ class Assistant(Agent):
         self._grace_task: asyncio.Task | None = None
         self._tasks: set = set()
         self._aux_llm = inference.LLM(model=LLM_MODEL)
+        # Monotonic counter for stable per-reply card ids (see _begin_card).
+        self._card_seq = 0
 
     async def on_enter(self) -> None:
         # Preload all three indexes so the first retrieval is fast. Guarded: log and
@@ -313,7 +315,8 @@ class Assistant(Agent):
         text = new_message.text_content or ""
         self.record_turn("user", text)
         self._wm.turn_seq += 1
-        self._wm.turn_card_id = f"{self._wm.conversation_id}:{self._wm.turn_seq}"
+        # The per-reply card id is assigned lazily at reply time (_begin_card), so it
+        # works for typed and out-of-turn replies too — not only audio turns.
 
         # A new turn arrived: stop any in-flight gap-fill; remember what was pending.
         prev = self._pending
@@ -478,11 +481,26 @@ class Assistant(Agent):
         except Exception:
             logger.exception("could not speak out of turn")
 
+    def _begin_card(self) -> str:
+        """The stable id for the current reply's card, shared by streamed partials and
+        the final update so the UI collapses them into ONE card. Generated lazily, so
+        it works for every reply path — audio turns, typed questions, and out-of-turn
+        gap-fills/corrections (typed/out-of-turn don't go through on_user_turn_completed)."""
+        if not self._wm.turn_card_id:
+            self._card_seq += 1
+            self._wm.turn_card_id = f"{self._wm.conversation_id}:c{self._card_seq}"
+        return self._wm.turn_card_id
+
+    def _end_card(self) -> None:
+        """Close the current reply's card so the next reply starts a fresh one."""
+        self._wm.turn_card_id = ""
+
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Stream the reply to the display card as it generates, so context shows up
         token-by-token instead of all at once when speech finishes. Yields chunks
         unchanged so STT→LLM→TTS is untouched; the final card is committed by the
-        conversation_item_added handler (same turn_card_id, so it updates in place)."""
+        conversation_item_added handler (same card id, so it updates in place)."""
+        cid = self._begin_card()
         acc = ""
         last = 0.0
         async for chunk in Agent.default.llm_node(
@@ -497,11 +515,11 @@ class Assistant(Agent):
                     last = now
                     with contextlib.suppress(Exception):
                         await self._publish_context(
-                            self._wm.pending_query or "(interjection)",
+                            self._wm.pending_query,
                             self._wm.pending_sources,
                             None,
                             answer=acc.strip(),
-                            card_id=self._wm.turn_card_id,
+                            card_id=cid,
                             streaming=True,
                         )
             yield chunk
@@ -532,17 +550,21 @@ class Assistant(Agent):
         answer = (answer or "").strip()
         sources = self._wm.pending_sources
         self._wm.pending_sources = []
+        # Reuse the streamed partials' id (or mint one for non-streamed replies), then
+        # close the card so the next reply is a fresh one.
+        cid = self._begin_card()
+        self._end_card()
         if not answer:
             return
         self._mark_surfaced(sources, answer)
-        # Final update for this turn's card (same id as the streamed partials);
+        # Final update for this reply's card (same id as the streamed partials);
         # streaming=False clears the UI "typing" state.
         await self._publish_context(
-            self._wm.pending_query or "(interjection)",
+            self._wm.pending_query,
             sources,
             None,
             answer=answer,
-            card_id=self._wm.turn_card_id,
+            card_id=cid,
         )
 
     # ---- working memory -------------------------------------------------------
