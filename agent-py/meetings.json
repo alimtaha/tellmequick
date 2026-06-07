@@ -1,12 +1,12 @@
 [
   {
     "id": "acme-finance:m-2026-05-15:decision:0",
-    "text": "Decision (IC, May 15): Pass on Coinbase (COIN) for now; revisit after the next print and clarity on the restructuring. Rationale: revenue remains concentrated in volatile crypto transaction fees; we want evidence of subscription & services diversification before initiating. Owner: Sarah Kim.",
+    "text": "Decision (deal review, May 15): Pass on Coinbase (COIN) for now; revisit after the next print and clarity on the restructuring. Rationale: revenue remains concentrated in volatile crypto transaction fees; we want evidence of subscription & services diversification before initiating. Owner: Sarah Kim.",
     "metadata": {"source": "meeting", "kind": "decision", "is_decision": "true", "owner": "sarah", "group_id": "acme-finance", "conversation_id": "m-2026-05-15", "topic": "coinbase-position", "timestamp": "2026-05-15T15:00:00Z"}
   },
   {
     "id": "acme-finance:m-2026-05-15:note:1",
-    "text": "Risk note (IC, May 15): Before sizing any COIN position, require (a) evidence of subscription & services mix expansion and (b) no signs of an insider exodus. Any initial position is a starter, capped at ~1% of NAV until a clean quarter confirms the diversification trend. Owner: Sarah Kim.",
+    "text": "Risk note (deal review, May 15): Before sizing any COIN position, require (a) evidence of subscription & services mix expansion and (b) no signs of an insider exodus. Any initial position is a starter, capped at ~1% of NAV until a clean quarter confirms the diversification trend. Owner: Sarah Kim.",
     "metadata": {"source": "meeting", "kind": "note", "owner": "sarah", "group_id": "acme-finance", "conversation_id": "m-2026-05-15", "topic": "coinbase-position", "timestamp": "2026-05-15T15:20:00Z"}
   },
   {

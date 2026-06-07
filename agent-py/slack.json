@@ -31,7 +31,7 @@
   },
   {
     "id": "slack:C_COIN:1779237000.0007",
-    "text": "Jane Street at 5.3% is liquidity/market-making conviction, not a long-term holder — flag that distinction for the IC so we don't overcount the 'smart money' signal.",
+    "text": "Jane Street at 5.3% is liquidity/market-making conviction, not a long-term holder — flag that distinction for the investment meeting so we don't overcount the 'smart money' signal.",
     "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-20T15:50:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17792370000007"}
   },
   {
@@ -46,12 +46,12 @@
   },
   {
     "id": "slack:C_COIN:1779408000.0010",
-    "text": "Pulling the segment table from the 10-K MD&A now. Directionally S&S is up YoY; I'll have the precise split for Thursday's IC.",
+    "text": "Pulling the segment table from the 10-K MD&A now. Directionally S&S is up YoY; I'll have the precise split for Thursday's investment meeting.",
     "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-22T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17794080000010"}
   },
   {
     "id": "slack:C_COIN:1779840000.0011",
-    "text": "Also for the IC notes: they reincorporated Delaware → Texas in December, and a director (Paul Clement) rolled off the board. Neither is thesis-changing, just housekeeping.",
+    "text": "Also for the investment-meeting notes: they reincorporated Delaware → Texas in December, and a director (Paul Clement) rolled off the board. Neither is thesis-changing, just housekeeping.",
     "metadata": {"source": "slack", "channel": "coin-research", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-27T15:20:00Z", "url": "https://acme.slack.com/archives/C_COIN/p17798400000011"}
   },
   {
@@ -100,28 +100,28 @@
     "metadata": {"source": "slack", "channel": "risk", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-02T18:30:00Z", "url": "https://acme.slack.com/archives/C_RISK/p17803602000020"}
   },
   {
-    "id": "slack:C_ICPREP:1780099200.0021",
-    "text": "Putting COIN back on Thursday's IC agenda. Reminder: we passed three weeks ago pending the print and restructuring clarity — this is the revisit, not a fresh pitch.",
-    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-30T18:00:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17800992000021"}
+    "id": "slack:C_DEAL:1780099200.0021",
+    "text": "Putting COIN back on Thursday's investment meeting agenda. Reminder: we passed at the deal review three weeks ago pending the print and restructuring clarity — this is the revisit, not a fresh pitch.",
+    "metadata": {"source": "slack", "channel": "deal-review", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-05-30T18:00:00Z", "url": "https://acme.slack.com/archives/C_DEAL/p17800992000021"}
   },
   {
-    "id": "slack:C_ICPREP:1780101000.0022",
+    "id": "slack:C_DEAL:1780101000.0022",
     "text": "Got it. I'll lead with what changed since the pass: the insider 10b5-1 detail, the holder base, the revenue mix, and the restructuring rationale.",
-    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-30T18:30:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17801010000022"}
+    "metadata": {"source": "slack", "channel": "deal-review", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-05-30T18:30:00Z", "url": "https://acme.slack.com/archives/C_DEAL/p17801010000022"}
   },
   {
-    "id": "slack:C_ICPREP:1780444800.0023",
+    "id": "slack:C_DEAL:1780444800.0023",
     "text": "Keep it tight — I want the buy/no-buy call decided in the room Thursday. Bring the exact S&S % and the holder table.",
-    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-03T18:00:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17804448000023"}
+    "metadata": {"source": "slack", "channel": "deal-review", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-03T18:00:00Z", "url": "https://acme.slack.com/archives/C_DEAL/p17804448000023"}
   },
   {
-    "id": "slack:C_ICPREP:1780446600.0024",
+    "id": "slack:C_DEAL:1780446600.0024",
     "text": "Will do. One open item I can't source: their actual AI product roadmap — the 'AI era' framing is in the 8-K but there's no product detail in the filings. I'll flag it as unknown, not guess.",
-    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-06-03T18:30:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17804466000024"}
+    "metadata": {"source": "slack", "channel": "deal-review", "group_id": "acme-finance", "user_id": "alex", "timestamp": "2026-06-03T18:30:00Z", "url": "https://acme.slack.com/archives/C_DEAL/p17804466000024"}
   },
   {
-    "id": "slack:C_ICPREP:1780448400.0025",
+    "id": "slack:C_DEAL:1780448400.0025",
     "text": "Good — don't guess on that. If it's not in the filings we treat it as unknown in the memo.",
-    "metadata": {"source": "slack", "channel": "ic-prep", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-03T19:00:00Z", "url": "https://acme.slack.com/archives/C_ICPREP/p17804484000025"}
+    "metadata": {"source": "slack", "channel": "deal-review", "group_id": "acme-finance", "user_id": "sarah", "timestamp": "2026-06-03T19:00:00Z", "url": "https://acme.slack.com/archives/C_DEAL/p17804484000025"}
   }
 ]

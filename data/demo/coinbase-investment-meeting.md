@@ -1,10 +1,11 @@
-# Demo script — Investment Committee: "Should we buy COIN?" (live)
+# Demo script — Investment meeting: "Should we buy COIN?" (live)
 
-**The room:** a public-markets fund's IC, revisiting Coinbase. **Sarah Kim** (Portfolio
-Manager, decides, skeptic) and **Alex Rivera** (Equity Analyst, did the digging). The
-**agent ("tellmequick")** listens in the background and interjects when a strong, fresh match
-turns up across the three Moss indexes — `knowledge` (Coinbase filings), `slack` (the team's
-debate), `meetings` (the prior IC decision). It also answers when addressed by name.
+**The room:** a public-markets fund's **investment meeting**, revisiting Coinbase. **Sarah Kim**
+(Portfolio Manager, decides, skeptic) and **Alex Rivera** (Equity Analyst, did the digging).
+The **agent ("tellmequick")** listens in the background and interjects when a strong, fresh
+match turns up across the three Moss indexes — `knowledge` (Coinbase filings), `slack` (the
+team's debate), `meetings` (the prior **deal review** decision). It also answers when addressed
+by name.
 
 Every beat lists the **question**, the **indexes it pulls**, and the **verified fact**. The
 power move is one question lighting up *a filing + a teammate's Slack line + the prior decision*.
@@ -15,7 +16,7 @@ power move is one question lighting up *a filing + a teammate's Slack line + the
 
 ### Beat 1 — "Didn't we already pass on this?" → meetings + slack
 **Sarah:** "Remind me where we landed last time, I don't want to relitigate."
-**🤖** "On May 15 the IC **passed for now** — revisit after the print and restructuring clarity, owner Sarah; the concern was revenue concentration in volatile transaction fees. The risk note said any entry is a **starter, ≤1% of NAV**, pending S&S diversification. — prior IC decision + #risk"
+**🤖** "At the **deal review on May 15** the team **passed for now** — revisit after the print and restructuring clarity, owner Sarah; the concern was revenue concentration in volatile transaction fees. The risk note said any entry is a **starter, ≤1% of NAV**, pending S&S diversification. — prior deal review + #risk"
 - *Pulls:* `meetings` (May-15 decision + risk note) + `slack` (#risk sizing rule).
 
 ### Beat 2 — "What changed — the layoffs?" → slack + knowledge (8-K)
@@ -53,7 +54,7 @@ power move is one question lighting up *a filing + a teammate's Slack line + the
 ### Beat 8 — Empty state (honesty) → nothing
 **Sarah:** "What's their actual AI product roadmap — what are they shipping?"
 **🤖** *(stays silent — no high-confidence match)*
-**Alex:** "That's the open item from #ic-prep — the filings only say 'AI era,' no product detail. We treat it as unknown." → agent didn't bluff.
+**Alex:** "That's the open item from #deal-review — the filings only say 'AI era,' no product detail. We treat it as unknown." → agent didn't bluff.
 
 ---
 
@@ -61,7 +62,7 @@ power move is one question lighting up *a filing + a teammate's Slack line + the
 
 ## Judge-appeal cheat sheet
 - **Cross-index (the differentiator):** Beats 1, 2, 3, 5, 6 each fuse `knowledge` + `slack` (+ `meetings`) in one answer.
-- **Memory / "didn't we decide?":** Beat 1 pulls the prior IC decision verbatim.
+- **Memory / "didn't we decide?":** Beat 1 pulls the prior deal-review decision verbatim.
 - **Unstructured parsing (Unsiloed):** the numbers in Beats 2–7 come from parsed 8-K / Form 4 / SC 13G / 10-K / proxy.
 - **Honesty:** Beat 8 refuses to answer what the filings don't contain.
 - **LiveKit:** interjections ride the natural Sarah/Alex back-and-forth; Beat 7 shows explicit address.
